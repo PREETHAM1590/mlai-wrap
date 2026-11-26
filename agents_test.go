@@ -241,3 +241,13 @@ func TestKeeperStopsWhenTheRunGivesNoToken(t *testing.T) {
 		t.Errorf("after a CLI change: %q, %v", tok, err)
 	}
 }
+
+func TestHookFailureIsNotTheAnswer(t *testing.T) {
+	setupStub(t)
+	t.Setenv("STUB_MODE", "hookanswer")
+	r := &Runner{Bin: cfg.MLAI, WorkDir: cfg.WorkDir}
+	res := r.Run(context.Background(), "hello", "m", "")
+	if res.Err != nil || res.Text != "REAL_REPLY" {
+		t.Errorf("got %q, %v; want the narration", res.Text, res.Err)
+	}
+}

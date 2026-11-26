@@ -42,6 +42,7 @@ type config struct {
 	Direct            bool
 	Bind              string
 	APIKey            string
+	IsolateSkills     bool
 }
 
 var (
@@ -69,6 +70,7 @@ func initFlags(args []string) {
 	fs.IntVar(&cfg.CacheSize, "cache-size", 512, "cache entries")
 	fs.StringVar(&cfg.Effort, "effort", envStr("MLAI_EFFORT", ""), "reasoning effort: low|medium|high|max")
 	fs.BoolVar(&cfg.Direct, "direct", envBool("MLAI_DIRECT", true), "talk to the gateway directly (real token streaming) with CLI fallback")
+	fs.BoolVar(&cfg.IsolateSkills, "isolate-skills", envBool("MLAI_ISOLATE_SKILLS", true), "run mlai without your Claude Code skills and agents (MLAI_HOME=~/mlai-bridge/home/.mlai)")
 	fs.StringVar(&cfg.Bind, "bind", envStr("MLAI_BIND", "127.0.0.1"), "listen address (0.0.0.0 to expose; requires an API key)")
 	// The env default is applied after Parse so `-h` never prints the key.
 	fs.StringVar(&cfg.APIKey, "api-key", "", "require this bearer key on /v1/* (env MLAI_API_KEY; empty = open, loopback only)")
@@ -125,10 +127,14 @@ func childEnv() []string {
 	env := os.Environ()
 	out := make([]string, 0, len(env)+2)
 	for _, kv := range env {
-		if name, _, _ := strings.Cut(kv, "="); strings.EqualFold(name, "MLAI_API_KEY") {
+		name, _, _ := strings.Cut(kv, "=")
+		if strings.EqualFold(name, "MLAI_API_KEY") || (mlaiHome != "" && strings.EqualFold(name, "MLAI_HOME")) {
 			continue
 		}
 		out = append(out, kv)
+	}
+	if mlaiHome != "" {
+		out = append(out, "MLAI_HOME="+mlaiHome)
 	}
 	return append(out, "NO_COLOR=1", "CI=1")
 }
@@ -151,6 +157,7 @@ type server struct {
 
 func newServer() *server {
 	os.MkdirAll(cfg.WorkDir, 0o700)
+	initIsolation()
 	var c *LRU
 	if cfg.CacheTTL > 0 {
 		c = NewLRU(cfg.CacheSize, cfg.CacheTTL)

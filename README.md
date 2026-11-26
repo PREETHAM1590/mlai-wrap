@@ -11,8 +11,8 @@ mlai-wrap claude -m pixis
 
 The program is still called `mlai-bridge` when it runs as a server; `mlai-wrap` is the same binary.
 
-> **Status:** with mlai 0.3.27 direct mode cannot get a run token, and on some Windows machines
-> `mlai` itself fails with a `UnicodeDecodeError`. See "Notes and limits".
+> **Status:** tested on Windows with mlai 0.3.27: Claude Code completes tool tasks through the
+> bridge in direct mode, and Codex talks to it through `/v1/responses`. See "Notes and limits".
 
 OpenAI- and Anthropic-compatible HTTP API in front of the **ML AI Code** CLI (`mlai`).
 
@@ -262,6 +262,7 @@ curl http://127.0.0.1:8197/v1/chat/completions -H 'Content-Type: application/jso
 | `-bind` `MLAI_BIND` | `127.0.0.1` | listen address; a non-loopback address requires `MLAI_API_KEY` (or `-api-key`), otherwise the bridge refuses to start |
 | `-api-key` `MLAI_API_KEY` | *empty* | require `Authorization: Bearer <key>` (or `x-api-key`, `api-key`) on `/v1/*`; `/healthz` and `/metrics` stay open. Prefer the env var: `-api-key` is visible in process lists |
 | `-direct` `MLAI_DIRECT` | `true` | gateway direct mode; `false` = CLI only |
+| `-isolate-skills` `MLAI_ISOLATE_SKILLS` | `true` | run `mlai` without your Claude Code skills and agents (see below) |
 
 ## Exposing it beyond localhost
 
@@ -357,6 +358,18 @@ guarantee, so validate arguments on your side.
 
 ## Notes and limits
 
+- **Your Claude Code skills and agents are not loaded into `mlai`.** `mlai` copies
+  `~/.claude/skills` and `~/.claude/agents` into every request, and its Windows engine reads
+  that request as cp1252, so a character such as `”` in any skill crashed it
+  (`UnicodeDecodeError: 'charmap' codec can't decode byte 0x9d`). The bridge therefore runs
+  `mlai` with `MLAI_HOME=~/mlai-bridge/home/.mlai`, a link (junction on Windows) to your real
+  `~/.mlai`: sign-in and sessions are shared, skills and agents are not. On Windows it also
+  replaces the few prompt characters that would still crash the engine (for example
+  `“` `”` become `"`). Turn it off with `MLAI_ISOLATE_SKILLS=false`. Never delete
+  `~/mlai-bridge/home` recursively: the link points at your real `~/.mlai`; remove the link
+  itself with `rmdir`.
+- **Engine hook warnings.** mlai 0.3.x sometimes reports "A Stop hook failed to execute: spawn
+  EPERM" as its answer; the bridge then returns the model's own reply instead.
 - **Windows: a burst of terminal tabs.** Each `mlai --bg` run (the keeper that direct mode
   uses) makes Windows Terminal open and close about 30 tabs in 20 s; `mlai --bg` does the
   same when you run it yourself. When a keeper run ends without a run token, as with mlai

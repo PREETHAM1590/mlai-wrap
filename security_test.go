@@ -137,6 +137,12 @@ func stubPrompt() int {
 		time.Sleep(30 * time.Second)
 	case "text":
 		stubResult(os.Getenv("STUB_TEXT"))
+	case "hookanswer": // mlai 0.3.x: the reply is a narration, the answer a hook failure
+		hook := "Stop hook\n\nA Stop hook failed to execute: spawn EPERM. Hooks always run on this local machine."
+		fmt.Println(`{"type":"narration","content":"REAL_REPLY"}`)
+		b, _ := json.Marshal(map[string]string{"type": "answer", "content": hook})
+		fmt.Println(string(b))
+		stubResult(hook)
 	default:
 		stubResult("stub:" + string(in))
 	}

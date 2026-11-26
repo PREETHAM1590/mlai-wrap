@@ -109,8 +109,8 @@ func (k *runKeeper) directOffMessage() string {
 
 // sessionsDir is where the CLI writes per-run state (and the run token).
 func sessionsDir() string {
-	if h, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(h, ".mlai", "sessions")
+	if h := realMlaiHome(); h != "" {
+		return filepath.Join(h, "sessions")
 	}
 	return ""
 }
