@@ -1,0 +1,13 @@
+mlai-bridge
+dist/
+node_modules/
+workspace/
+*.log
+.DS_Store
+.mlai/
+
+# local secrets
+.apikey
+.env
+*.env
+*.exe

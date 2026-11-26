@@ -1,0 +1,44 @@
+{
+  "name": "ml-wrap",
+  "version": "0.0.0",
+  "description": "Run Claude Code and Codex on ML AI Code models, and serve an OpenAI/Anthropic compatible API on top of the mlai CLI",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PREETHAM1590/ml-wrap.git"
+  },
+  "homepage": "https://github.com/PREETHAM1590/ml-wrap#readme",
+  "bugs": {
+    "url": "https://github.com/PREETHAM1590/ml-wrap/issues"
+  },
+  "keywords": [
+    "ml-wrap",
+    "mlai",
+    "mlai-bridge",
+    "claude-code",
+    "codex",
+    "openai",
+    "anthropic",
+    "proxy"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "ml-wrap": "bin/ml-wrap.js",
+    "mlai-bridge": "bin/mlai-bridge.js"
+  },
+  "files": [
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "optionalDependencies": {
+    "ml-wrap-win32-x64": "0.0.0",
+    "ml-wrap-linux-x64": "0.0.0",
+    "ml-wrap-linux-arm64": "0.0.0",
+    "ml-wrap-darwin-x64": "0.0.0",
+    "ml-wrap-darwin-arm64": "0.0.0"
+  }
+}
