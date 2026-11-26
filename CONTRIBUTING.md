@@ -17,7 +17,7 @@ are narrow and the test surface is small.
 ## Development
 
 ```bash
-git clone https://github.com/PREETHAM1590/ml-wrap && cd ml-wrap
+git clone https://github.com/PREETHAM1590/mlai-wrap && cd mlai-wrap
 go build -o mlai-bridge .
 go test ./...
 
@@ -73,9 +73,9 @@ Then update `docs/MODELS.md` (id, display name, plan, notes) **and** the `ids` s
 ## Releasing
 
 Tag the commit `vX.Y.Z` and push the tag. CI builds the five binaries, creates the GitHub
-release, then publishes `ml-wrap` and the `ml-wrap-*` platform packages to npm with version
-`X.Y.Z` (the version in `npm/ml-wrap/package.json` stays `0.0.0`). The repository needs an
-`NPM_TOKEN` secret that can publish to the `ml-wrap` package and the `@ml-wrap` scope.
+release, then publishes `mlai-wrap` and the `mlai-wrap-*` platform packages to npm with version
+`X.Y.Z` (the version in `npm/mlai-wrap/package.json` stays `0.0.0`). The repository needs an
+`NPM_TOKEN` secret that can publish to the `mlai-wrap` package and the `@mlai-wrap` scope.
 To check the packages locally, build the binaries into `dist/` as named in
 `.github/workflows/ci.yml` and run `node scripts/npm-build.mjs X.Y.Z dist`.
 

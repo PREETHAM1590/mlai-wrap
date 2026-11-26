@@ -170,18 +170,18 @@ func TestParseLaunchArgs(t *testing.T) {
 }
 
 func TestBinaryNameAndHelpFlag(t *testing.T) {
-	for _, p := range []string{"ml-wrap", "ml-wrap.exe", "ML-Wrap.EXE"} {
-		if got := binaryName(filepath.Join("some", "dir", p)); got != "ml-wrap" {
+	for _, p := range []string{"mlai-wrap", "mlai-wrap.exe", "MLAI-Wrap.EXE"} {
+		if got := binaryName(filepath.Join("some", "dir", p)); got != "mlai-wrap" {
 			t.Errorf("binaryName(%q) = %q", p, got)
 		}
 	}
-	t.Setenv("ML_WRAP_ARGV0", "")
+	t.Setenv("MLAI_WRAP_ARGV0", "")
 	if got := programName(filepath.Join("some", "dir", "mlai-bridge.exe")); got != "mlai-bridge" {
 		t.Errorf("programName without override = %q", got)
 	}
-	t.Setenv("ML_WRAP_ARGV0", "ml-wrap")
-	if got := programName(filepath.Join("some", "dir", "mlai-bridge.exe")); got != "ml-wrap" {
-		t.Errorf("programName with ML_WRAP_ARGV0 = %q", got)
+	t.Setenv("MLAI_WRAP_ARGV0", "mlai-wrap")
+	if got := programName(filepath.Join("some", "dir", "mlai-bridge.exe")); got != "mlai-wrap" {
+		t.Errorf("programName with MLAI_WRAP_ARGV0 = %q", got)
 	}
 	for _, a := range []string{"-h", "--help", "--version"} {
 		if !isHelpFlag(a) {
@@ -202,7 +202,7 @@ func TestRunCLIBasics(t *testing.T) {
 	}
 	for _, a := range []string{"help", "-h", "--help"} {
 		out.Reset()
-		if code := runCLI([]string{a}, &out, &errb); code != 0 || !strings.Contains(out.String(), "ml-wrap") {
+		if code := runCLI([]string{a}, &out, &errb); code != 0 || !strings.Contains(out.String(), "mlai-wrap") {
 			t.Errorf("%s: code %d, stdout %q", a, code, out.String())
 		}
 	}

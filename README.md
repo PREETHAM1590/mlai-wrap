@@ -1,15 +1,15 @@
-# ml-wrap
+# mlai-wrap
 
 Run Claude Code and Codex on ML AI Code models, and serve an OpenAI/Anthropic compatible API on
 top of the `mlai` CLI. Based on [mlai-bridge](https://github.com/codewith-aditya/mlai-bridge) by
-Aditya Wakharkar (MIT), with security hardening and the `ml-wrap` launcher added.
+Aditya Wakharkar (MIT), with security hardening and the `mlai-wrap` launcher added.
 
 ```bash
-npm install -g ml-wrap
-ml-wrap claude -m pixis
+npm install -g mlai-wrap
+mlai-wrap claude -m pixis
 ```
 
-The program is still called `mlai-bridge` when it runs as a server; `ml-wrap` is the same binary.
+The program is still called `mlai-bridge` when it runs as a server; `mlai-wrap` is the same binary.
 
 > **Status:** with mlai 0.3.27 direct mode cannot get a run token, and on some Windows machines
 > `mlai` itself fails with a `UnicodeDecodeError`. See "Notes and limits".
@@ -116,21 +116,21 @@ harness prompt. `pixis-opus` on a warm keeper has measured **0.66–0.94 s TTFT*
 
 ## Install
 
-With npm (Node.js 18+). It installs a prebuilt binary and the commands `ml-wrap` and
+With npm (Node.js 18+). It installs a prebuilt binary and the commands `mlai-wrap` and
 `mlai-bridge`; nothing is downloaded or compiled during the install.
 
 ```bash
-npm install -g ml-wrap
+npm install -g mlai-wrap
 ```
 
 Supported platforms: Windows x64, Linux x64 and arm64, macOS x64 and arm64. The binary comes
-from an optional dependency (`ml-wrap-<os>-<cpu>`), so do not install with `--omit=optional`
-or `--no-optional`. To run a binary you built yourself, set `ML_WRAP_BINARY` to its path.
+from an optional dependency (`mlai-wrap-<os>-<cpu>`), so do not install with `--omit=optional`
+or `--no-optional`. To run a binary you built yourself, set `MLAI_WRAP_BINARY` to its path.
 
 Or build from source:
 
 ```bash
-git clone https://github.com/PREETHAM1590/ml-wrap && cd ml-wrap
+git clone https://github.com/PREETHAM1590/mlai-wrap && cd mlai-wrap
 go build -o mlai-bridge .
 ```
 
@@ -191,15 +191,15 @@ Key points of the unit:
 ## Run Claude Code or Codex through the bridge
 
 ```bash
-ml-wrap claude                          # default model
-ml-wrap claude -m pixis -- -p "fix the failing test"
-ml-wrap codex -m pixis-sol
-ml-wrap codex -- exec "explain this repo"
-ml-wrap claude --dry-run                # show the command and variable names only
+mlai-wrap claude                          # default model
+mlai-wrap claude -m pixis -- -p "fix the failing test"
+mlai-wrap codex -m pixis-sol
+mlai-wrap codex -- exec "explain this repo"
+mlai-wrap claude --dry-run                # show the command and variable names only
 ```
 
-`ml-wrap` is the same binary (`make install` links it); `mlai-bridge claude` works too. On
-Windows copy `mlai-bridge.exe` to `ml-wrap.exe`. The launcher starts a private bridge on
+`mlai-wrap` is the same binary (`make install` links it); `mlai-bridge claude` works too. On
+Windows copy `mlai-bridge.exe` to `mlai-wrap.exe`. The launcher starts a private bridge on
 `127.0.0.1` with a random key, runs the client with it and stops the bridge when the client
 exits (log: `~/mlai-bridge/wrap.log`). It sets variables (and `-c` options for Codex) for that
 process only: no Claude Code or Codex file is changed. Use `--url` or `MLAI_BRIDGE_URL`, with

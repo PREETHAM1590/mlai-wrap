@@ -1,4 +1,4 @@
-// Shared launcher for the ml-wrap and mlai-bridge commands. The Go binary
+// Shared launcher for the mlai-wrap and mlai-bridge commands. The Go binary
 // comes from a per-platform package (optionalDependencies); nothing is
 // downloaded or built at install time.
 import { spawn } from "node:child_process";
@@ -6,11 +6,11 @@ import { createRequire } from "node:module";
 import { accessSync, chmodSync, constants } from "node:fs";
 
 const PACKAGES = {
-  "win32-x64": "ml-wrap-win32-x64",
-  "linux-x64": "ml-wrap-linux-x64",
-  "linux-arm64": "ml-wrap-linux-arm64",
-  "darwin-x64": "ml-wrap-darwin-x64",
-  "darwin-arm64": "ml-wrap-darwin-arm64",
+  "win32-x64": "mlai-wrap-win32-x64",
+  "linux-x64": "mlai-wrap-linux-x64",
+  "linux-arm64": "mlai-wrap-linux-arm64",
+  "darwin-x64": "mlai-wrap-darwin-x64",
+  "darwin-arm64": "mlai-wrap-darwin-arm64",
 };
 
 function fail(message, code = 1) {
@@ -19,16 +19,16 @@ function fail(message, code = 1) {
 }
 
 function resolveBinary() {
-  const override = process.env.ML_WRAP_BINARY;
+  const override = process.env.MLAI_WRAP_BINARY;
   if (override) return override;
 
   const key = `${process.platform}-${process.arch}`;
   const pkg = PACKAGES[key];
   if (!pkg) {
     fail(
-      `ml-wrap: no prebuilt binary for ${key}.\n` +
+      `mlai-wrap: no prebuilt binary for ${key}.\n` +
         `Supported: ${Object.keys(PACKAGES).join(", ")}.\n` +
-        "Build from source (https://github.com/PREETHAM1590/ml-wrap) and set ML_WRAP_BINARY to the binary.",
+        "Build from source (https://github.com/PREETHAM1590/mlai-wrap) and set MLAI_WRAP_BINARY to the binary.",
     );
   }
   const file = `${pkg}/bin/mlai-bridge${process.platform === "win32" ? ".exe" : ""}`;
@@ -36,10 +36,10 @@ function resolveBinary() {
     return createRequire(import.meta.url).resolve(file);
   } catch {
     fail(
-      `ml-wrap: the platform package ${pkg} is not installed.\n` +
-        "It is an optional dependency of ml-wrap. Reinstall without --omit=optional / --no-optional:\n" +
-        "  npm install -g ml-wrap\n" +
-        "Or set ML_WRAP_BINARY to the path of an mlai-bridge binary.",
+      `mlai-wrap: the platform package ${pkg} is not installed.\n` +
+        "It is an optional dependency of mlai-wrap. Reinstall without --omit=optional / --no-optional:\n" +
+        "  npm install -g mlai-wrap\n" +
+        "Or set MLAI_WRAP_BINARY to the path of an mlai-bridge binary.",
     );
   }
 }
@@ -60,7 +60,7 @@ export function run(name) {
   }
   const child = spawn(binary, process.argv.slice(2), {
     argv0: name, // ignored on Windows, so the name is also passed in the environment
-    env: { ...process.env, ML_WRAP_ARGV0: name },
+    env: { ...process.env, MLAI_WRAP_ARGV0: name },
     stdio: "inherit",
     windowsHide: false,
     shell: false,

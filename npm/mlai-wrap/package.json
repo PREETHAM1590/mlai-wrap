@@ -1,18 +1,18 @@
 {
-  "name": "ml-wrap",
+  "name": "mlai-wrap",
   "version": "0.0.0",
   "description": "Run Claude Code and Codex on ML AI Code models, and serve an OpenAI/Anthropic compatible API on top of the mlai CLI",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/PREETHAM1590/ml-wrap.git"
+    "url": "git+https://github.com/PREETHAM1590/mlai-wrap.git"
   },
-  "homepage": "https://github.com/PREETHAM1590/ml-wrap#readme",
+  "homepage": "https://github.com/PREETHAM1590/mlai-wrap#readme",
   "bugs": {
-    "url": "https://github.com/PREETHAM1590/ml-wrap/issues"
+    "url": "https://github.com/PREETHAM1590/mlai-wrap/issues"
   },
   "keywords": [
-    "ml-wrap",
+    "mlai-wrap",
     "mlai",
     "mlai-bridge",
     "claude-code",
@@ -26,7 +26,7 @@
     "node": ">=18"
   },
   "bin": {
-    "ml-wrap": "bin/ml-wrap.js",
+    "mlai-wrap": "bin/mlai-wrap.js",
     "mlai-bridge": "bin/mlai-bridge.js"
   },
   "files": [
@@ -35,10 +35,10 @@
     "LICENSE"
   ],
   "optionalDependencies": {
-    "ml-wrap-win32-x64": "0.0.0",
-    "ml-wrap-linux-x64": "0.0.0",
-    "ml-wrap-linux-arm64": "0.0.0",
-    "ml-wrap-darwin-x64": "0.0.0",
-    "ml-wrap-darwin-arm64": "0.0.0"
+    "mlai-wrap-win32-x64": "0.0.0",
+    "mlai-wrap-linux-x64": "0.0.0",
+    "mlai-wrap-linux-arm64": "0.0.0",
+    "mlai-wrap-darwin-x64": "0.0.0",
+    "mlai-wrap-darwin-arm64": "0.0.0"
   }
 }

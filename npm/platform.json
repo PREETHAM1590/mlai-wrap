@@ -1,7 +1,7 @@
 [
-  { "pkg": "ml-wrap-win32-x64", "os": "win32", "cpu": "x64", "goos": "windows", "goarch": "amd64", "exe": ".exe" },
-  { "pkg": "ml-wrap-linux-x64", "os": "linux", "cpu": "x64", "goos": "linux", "goarch": "amd64", "exe": "" },
-  { "pkg": "ml-wrap-linux-arm64", "os": "linux", "cpu": "arm64", "goos": "linux", "goarch": "arm64", "exe": "" },
-  { "pkg": "ml-wrap-darwin-x64", "os": "darwin", "cpu": "x64", "goos": "darwin", "goarch": "amd64", "exe": "" },
-  { "pkg": "ml-wrap-darwin-arm64", "os": "darwin", "cpu": "arm64", "goos": "darwin", "goarch": "arm64", "exe": "" }
+  { "pkg": "mlai-wrap-win32-x64", "os": "win32", "cpu": "x64", "goos": "windows", "goarch": "amd64", "exe": ".exe" },
+  { "pkg": "mlai-wrap-linux-x64", "os": "linux", "cpu": "x64", "goos": "linux", "goarch": "amd64", "exe": "" },
+  { "pkg": "mlai-wrap-linux-arm64", "os": "linux", "cpu": "arm64", "goos": "linux", "goarch": "arm64", "exe": "" },
+  { "pkg": "mlai-wrap-darwin-x64", "os": "darwin", "cpu": "x64", "goos": "darwin", "goarch": "amd64", "exe": "" },
+  { "pkg": "mlai-wrap-darwin-arm64", "os": "darwin", "cpu": "arm64", "goos": "darwin", "goarch": "arm64", "exe": "" }
 ]

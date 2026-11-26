@@ -314,18 +314,18 @@ func (s *server) shutdown(srv *http.Server) {
 }
 
 // programName is the name the program was started as. The npm launcher sets
-// ML_WRAP_ARGV0 because Windows ignores argv[0] overrides.
+// MLAI_WRAP_ARGV0 because Windows ignores argv[0] overrides.
 func programName(arg0 string) string {
-	if v := os.Getenv("ML_WRAP_ARGV0"); v != "" {
+	if v := os.Getenv("MLAI_WRAP_ARGV0"); v != "" {
 		arg0 = v
-		os.Unsetenv("ML_WRAP_ARGV0") // not for the clients this starts
+		os.Unsetenv("MLAI_WRAP_ARGV0") // not for the clients this starts
 	}
 	return binaryName(arg0)
 }
 
 func main() {
 	args := os.Args[1:]
-	if len(args) == 0 && strings.HasPrefix(programName(os.Args[0]), "ml-wrap") {
+	if len(args) == 0 && strings.HasPrefix(programName(os.Args[0]), "mlai-wrap") {
 		printHelp(os.Stdout)
 		return
 	}

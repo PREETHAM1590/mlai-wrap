@@ -1,4 +1,4 @@
 #!/usr/bin/env node
 import { run } from "./run.js";
 
-run("ml-wrap");
+run("mlai-wrap");

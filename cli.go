@@ -51,7 +51,7 @@ Usage:
 claude and codex use the bridge at --url or MLAI_BRIDGE_URL (key from
 MLAI_API_KEY). Without either, they run a private bridge on 127.0.0.1 with a
 random key for the lifetime of the client; its log is ~/mlai-bridge/wrap.log.
-The same binary also works as "ml-wrap".
+The same binary also works as "mlai-wrap".
 `
 
 // lookPath is replaced in tests.

@@ -36,7 +36,7 @@ const outDir = path.join(root, "dist", "npm");
 const readJSON = (file) => JSON.parse(readFileSync(file, "utf8"));
 
 const platforms = readJSON(path.join(root, "npm", "platform.json"));
-const mainSrc = path.join(root, "npm", "ml-wrap");
+const mainSrc = path.join(root, "npm", "mlai-wrap");
 const main = readJSON(path.join(mainSrc, "package.json"));
 
 // Check every input before writing anything.
@@ -56,7 +56,7 @@ for (const p of inputs) {
   const manifest = {
     name: p.pkg,
     version,
-    description: `${p.goos}/${p.goarch} binary for ml-wrap`,
+    description: `${p.goos}/${p.goarch} binary for mlai-wrap`,
     os: [p.os],
     cpu: [p.cpu],
     license: main.license,
@@ -72,7 +72,7 @@ for (const p of inputs) {
   dirs.push(dir);
 }
 
-const mainDir = path.join(outDir, "ml-wrap");
+const mainDir = path.join(outDir, "mlai-wrap");
 cpSync(mainSrc, mainDir, { recursive: true });
 const manifest = readJSON(path.join(mainDir, "package.json"));
 manifest.version = version;
