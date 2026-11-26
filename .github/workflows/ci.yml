@@ -84,6 +84,8 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          tag=latest
+          case "$GITHUB_REF_NAME" in *-*) tag=next ;; esac # prereleases never become "latest"
           while read -r dir; do
-            (cd "$dir" && npm publish --access public --provenance)
+            (cd "$dir" && npm publish --access public --provenance --tag "$tag")
           done < "$RUNNER_TEMP/npm-dirs.txt"
