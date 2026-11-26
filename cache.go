@@ -11,20 +11,32 @@ import (
 	"time"
 )
 
+// Defaults for the byte limits NewLRU applies: the whole cache and one entry.
+// Tests may change them before creating a cache.
+var (
+	cacheMaxBytes = 64 << 20
+	cacheMaxEntry = 1 << 20
+)
+
 type cacheEntry struct {
 	key     string
 	value   []byte
 	expires time.Time
 }
 
+func (e *cacheEntry) size() int { return len(e.key) + len(e.value) }
+
 type LRU struct {
-	mu    sync.Mutex
-	cap   int
-	ttl   time.Duration
-	items map[string]*list.Element
-	order *list.List
-	hits  int64
-	miss  int64
+	mu       sync.Mutex
+	cap      int
+	maxBytes int
+	maxEntry int
+	bytes    int
+	ttl      time.Duration
+	items    map[string]*list.Element
+	order    *list.List
+	hits     int64
+	miss     int64
 }
 
 func NewLRU(capacity int, ttl time.Duration) *LRU {
@@ -32,10 +44,12 @@ func NewLRU(capacity int, ttl time.Duration) *LRU {
 		capacity = 256
 	}
 	return &LRU{
-		cap:   capacity,
-		ttl:   ttl,
-		items: make(map[string]*list.Element, capacity),
-		order: list.New(),
+		cap:      capacity,
+		maxBytes: cacheMaxBytes,
+		maxEntry: cacheMaxEntry,
+		ttl:      ttl,
+		items:    make(map[string]*list.Element, capacity),
+		order:    list.New(),
 	}
 }
 
@@ -51,6 +65,7 @@ func (c *LRU) Get(key string) ([]byte, bool) {
 	if time.Now().After(e.expires) {
 		c.order.Remove(el)
 		delete(c.items, key)
+		c.bytes -= e.size()
 		c.miss++
 		return nil, false
 	}
@@ -62,22 +77,34 @@ func (c *LRU) Get(key string) ([]byte, bool) {
 func (c *LRU) Put(key string, value []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if len(value) > c.maxEntry {
+		if el, ok := c.items[key]; ok { // the old answer is stale now
+			c.bytes -= el.Value.(*cacheEntry).size()
+			c.order.Remove(el)
+			delete(c.items, key)
+		}
+		return
+	}
 	if el, ok := c.items[key]; ok {
 		e := el.Value.(*cacheEntry)
+		c.bytes += len(value) - len(e.value)
 		e.value = value
 		e.expires = time.Now().Add(c.ttl)
 		c.order.MoveToFront(el)
-		return
+	} else {
+		e := &cacheEntry{key: key, value: value, expires: time.Now().Add(c.ttl)}
+		c.items[key] = c.order.PushFront(e)
+		c.bytes += e.size()
 	}
-	el := c.order.PushFront(&cacheEntry{key: key, value: value, expires: time.Now().Add(c.ttl)})
-	c.items[key] = el
-	for c.order.Len() > c.cap {
+	for c.order.Len() > c.cap || c.bytes > c.maxBytes {
 		last := c.order.Back()
 		if last == nil {
 			break
 		}
+		e := last.Value.(*cacheEntry)
 		c.order.Remove(last)
-		delete(c.items, last.Value.(*cacheEntry).key)
+		delete(c.items, e.key)
+		c.bytes -= e.size()
 	}
 }
 

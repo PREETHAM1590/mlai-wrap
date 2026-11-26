@@ -16,7 +16,10 @@ ENV HOME=/home/node
 WORKDIR /data
 # 0.0.0.0 is needed to publish the port. The bridge refuses to start on a
 # non-loopback address without MLAI_API_KEY; pass it at run time (-e / --env-file), never bake it in.
+# MLAI_ALLOW_PLAIN_HTTP is the opt-in for plain HTTP on that address. It is meant for inside the
+# container only: publish the port as 127.0.0.1:8197:8197 or put TLS in front.
 ENV MLAI_BIND=0.0.0.0 \
+    MLAI_ALLOW_PLAIN_HTTP=true \
     MLAI_WORKDIR=/data/workspace \
     MLAI_MODEL=pixis-opus \
     MLAI_PORT=8197

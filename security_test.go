@@ -104,6 +104,9 @@ func stubBackground() int {
 	if err != nil {
 		return 1
 	}
+	if os.Getenv("STUB_BG") == "slow" { // a keeper that is still warming up
+		time.Sleep(30 * time.Second)
+	}
 	id := fmt.Sprintf("stub-%d-%d", os.Getpid(), time.Now().UnixNano())
 	dir := filepath.Join(os.Getenv("STUB_HOME"), ".mlai", "sessions", id)
 	if err := os.MkdirAll(filepath.Join(dir, "engine"), 0o700); err != nil {
@@ -440,8 +443,15 @@ func TestValidateConfig(t *testing.T) {
 		} else if !strings.Contains(err.Error(), "MLAI_API_KEY") {
 			t.Errorf("bind %q: error should name the fix: %v", bind, err)
 		}
-		if err := validateConfig(config{Bind: bind, APIKey: testKey}); err != nil {
-			t.Errorf("bind %q with key: %v", bind, err)
+		// A key alone is not enough: it would travel over plain HTTP.
+		if err := validateConfig(config{Bind: bind, APIKey: testKey}); err == nil || !strings.Contains(err.Error(), "MLAI_ALLOW_PLAIN_HTTP") {
+			t.Errorf("bind %q with key but no plain-HTTP opt-in: %v, want a refusal", bind, err)
+		}
+		if err := validateConfig(config{Bind: bind, APIKey: testKey, AllowPlainHTTP: true}); err != nil {
+			t.Errorf("bind %q with key and opt-in: %v", bind, err)
+		}
+		if err := validateConfig(config{Bind: bind, AllowPlainHTTP: true}); err == nil {
+			t.Errorf("bind %q with opt-in but no key must be refused", bind)
 		}
 	}
 }

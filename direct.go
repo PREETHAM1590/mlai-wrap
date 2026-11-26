@@ -10,6 +10,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -62,53 +64,37 @@ type runKeeper struct {
 	fails     int
 	refresh   chan struct{}
 	closed    bool
-	// unsupported is set once a keeper run ended without a run token: this mlai
-	// version cannot serve direct mode, and every new keeper run costs a burst
-	// of console windows on Windows. Remembered per CLI binary in unsupportedFile.
-	unsupported bool
-	// proc is the running keeper process, stopped with the run it keeps.
-	proc *exec.Cmd
+	// markerDir is the .keeper folder shared by every bridge on the same workdir;
+	// dir (the keeper's working directory) is private to this one.
+	markerDir string
+	// proc is the running keeper process and procDone is closed once it has been
+	// waited for. Both are set after Start and cleared by stopProc.
+	proc     *exec.Cmd
+	procDone chan struct{}
 }
 
 // errNoRunToken means the keeper's run ended without writing a run token.
 var errNoRunToken = errors.New("the keeper run ended without a run token")
 
+// unsupportedFile is the marker older builds wrote to turn direct mode off for
+// good after one keeper run without a token. A sign-in, quota or network
+// problem looks the same, so failures are no longer persisted: the keeper
+// retries with its backoff instead, and the old marker is removed.
 const unsupportedFile = "unsupported"
 
-// cliStamp identifies the installed CLI (`mlai --version`), so an update retries
-// the keeper. It is "" when the version cannot be read.
-func cliStamp(bin string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, bin, "--version")
-	cmd.Env = childEnv()
-	cmd.WaitDelay = 5 * time.Second
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	line, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
-	return strings.TrimSpace(line)
-}
-
 func newRunKeeper(mlaiBin, workdir string) *runKeeper {
-	dir := filepath.Join(workdir, ".keeper")
-	if abs, err := filepath.Abs(dir); err == nil {
-		dir = abs
+	// Every bridge process gets its own keeper folder, so two bridges sharing a
+	// workspace never adopt or stop each other's runs. The marker stays in base.
+	base := filepath.Join(workdir, ".keeper")
+	if abs, err := filepath.Abs(base); err == nil {
+		base = abs
 	}
+	var rnd [4]byte
+	rand.Read(rnd[:])
+	dir := filepath.Join(base, fmt.Sprintf("%d-%s", os.Getpid(), hex.EncodeToString(rnd[:])))
 	os.MkdirAll(dir, 0o700)
-	k := &runKeeper{dir: dir, mlai: mlaiBin}
-	if raw, err := os.ReadFile(filepath.Join(dir, unsupportedFile)); err == nil {
-		if stamp := cliStamp(mlaiBin); stamp != "" && strings.TrimSpace(string(raw)) == stamp {
-			k.unsupported = true
-		}
-	}
-	return k
-}
-
-// directOffMessage explains why direct mode is off and how to retry.
-func (k *runKeeper) directOffMessage() string {
-	return fmt.Sprintf("direct mode is off: this mlai version gives no run token (delete %s to retry)", filepath.Join(k.dir, unsupportedFile))
+	os.Remove(filepath.Join(base, unsupportedFile))
+	return &runKeeper{dir: dir, markerDir: base, mlai: mlaiBin}
 }
 
 // sessionsDir is where the CLI writes per-run state (and the run token).
@@ -244,10 +230,6 @@ func (k *runKeeper) Refresh(ctx context.Context, stale string) (string, error) {
 		k.mu.Unlock()
 		return "", errors.New("keeper closed")
 	}
-	if k.unsupported {
-		k.mu.Unlock()
-		return "", errors.New(k.directOffMessage())
-	}
 	if k.refresh == nil {
 		if wait := keeperCooldown<<min(k.fails, 5) - time.Since(k.lastSpawn); wait > 0 {
 			k.mu.Unlock()
@@ -293,13 +275,8 @@ func (k *runKeeper) runRefresh(done chan struct{}) {
 	switch {
 	case err != nil:
 		k.fails++
-		if errors.Is(err, errNoRunToken) {
-			k.unsupported = true
-			if stamp := cliStamp(k.mlai); stamp != "" {
-				os.WriteFile(filepath.Join(k.dir, unsupportedFile), []byte(stamp+"\n"), 0o600)
-			}
-			logger.Print(k.directOffMessage())
-		}
+		// Not persisted: the next refresh waits keeperCooldown << fails (up to 32x).
+		logger.Printf("keeper failed (%d in a row): %v", k.fails, err)
 	case k.closed:
 		orphan, err = id, errors.New("keeper closed")
 	default:
@@ -340,11 +317,22 @@ func (k *runKeeper) spawn() (string, string, error) {
 	exited := make(chan struct{})
 	go func() { cmd.Wait(); close(exited) }()
 	k.mu.Lock()
-	k.proc = cmd
+	k.proc, k.procDone = cmd, exited
 	k.mu.Unlock()
+	// fail ends the owned process if it still runs: no failed spawn leaves one behind.
+	fail := func(err error) (string, string, error) {
+		k.stopProc()
+		return "", "", err
+	}
 
 	deadline := time.Now().Add(90 * time.Second)
 	for time.Now().Before(deadline) {
+		k.mu.Lock()
+		closed := k.closed
+		k.mu.Unlock()
+		if closed {
+			return fail(errors.New("keeper closed"))
+		}
 		if tok, id, ok := tokenFromNewestSession(start, k.dir, seen); ok {
 			logger.Printf("run token refreshed (keeper pid %d, len %d)", cmd.Process.Pid, len(tok))
 			return tok, id, nil
@@ -362,12 +350,11 @@ func (k *runKeeper) spawn() (string, string, error) {
 			if tok, tid, ok := tokenFromNewestSession(start, k.dir, seen); ok {
 				return tok, tid, nil
 			}
-			return "", "", fmt.Errorf("%w (run %s)", errNoRunToken, ended)
+			return fail(fmt.Errorf("%w (run %s)", errNoRunToken, ended))
 		}
 		time.Sleep(750 * time.Millisecond)
 	}
-	killTree(cmd)
-	return "", "", fmt.Errorf("no run token appeared within 90s: %s", strings.TrimSpace(out.String()))
+	return fail(fmt.Errorf("no run token appeared within 90s: %s", strings.TrimSpace(out.String())))
 }
 
 // endedKeeperRun returns the id of a new session in dir whose background run
@@ -396,24 +383,35 @@ func endedKeeperRun(dir string, seen map[string]bool) string {
 	return ""
 }
 
+// stopProc kills the keeper process this keeper owns, if it still runs.
+func (k *runKeeper) stopProc() {
+	k.mu.Lock()
+	proc, done := k.proc, k.procDone
+	k.proc, k.procDone = nil, nil
+	k.mu.Unlock()
+	if proc == nil {
+		return
+	}
+	select {
+	case <-done:
+	default:
+		killTree(proc)
+	}
+}
+
 // stop asks the CLI to end a keeper run. Best effort: errors are ignored.
 func (k *runKeeper) stop(id string) {
 	if id == "" || strings.HasPrefix(id, "-") {
 		return
 	}
-	k.mu.Lock()
-	proc := k.proc
-	k.proc = nil
-	k.mu.Unlock()
-	if proc != nil && proc.ProcessState == nil {
-		killTree(proc)
-	}
+	k.stopProc()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, k.mlai, "agents", "stop", id)
 	cmd.Dir = k.dir
 	cmd.Env = childEnv()
 	cmd.WaitDelay = 5 * time.Second
+	hideConsole(cmd)
 	cmd.Run()
 }
 
@@ -425,6 +423,7 @@ func (k *runKeeper) Close() {
 	k.session, k.token = "", ""
 	refresh := k.refresh
 	k.mu.Unlock()
+	k.stopProc() // a keeper that is still warming up has no session to stop yet
 	k.stop(id)
 	if refresh != nil { // a run is being opened: give it time to appear so it gets stopped
 		select {
@@ -432,6 +431,7 @@ func (k *runKeeper) Close() {
 		case <-time.After(closeWait):
 		}
 	}
+	os.RemoveAll(k.dir) // only this instance's folder, never the shared base
 }
 
 // directRequest posts an OpenAI-shaped body to the gateway with the run token.

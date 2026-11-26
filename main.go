@@ -4,6 +4,10 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -43,6 +47,7 @@ type config struct {
 	Bind              string
 	APIKey            string
 	IsolateSkills     bool
+	AllowPlainHTTP    bool
 }
 
 var (
@@ -72,6 +77,7 @@ func initFlags(args []string) {
 	fs.BoolVar(&cfg.Direct, "direct", envBool("MLAI_DIRECT", true), "talk to the gateway directly (real token streaming) with CLI fallback")
 	fs.BoolVar(&cfg.IsolateSkills, "isolate-skills", envBool("MLAI_ISOLATE_SKILLS", true), "run mlai without your Claude Code skills and agents (MLAI_HOME=~/mlai-bridge/home/.mlai)")
 	fs.StringVar(&cfg.Bind, "bind", envStr("MLAI_BIND", "127.0.0.1"), "listen address (0.0.0.0 to expose; requires an API key)")
+	fs.BoolVar(&cfg.AllowPlainHTTP, "allow-plain-http", envBool("MLAI_ALLOW_PLAIN_HTTP", false), "allow a non-loopback bind, which serves the API key and request bodies over plain HTTP (trusted networks only)")
 	// The env default is applied after Parse so `-h` never prints the key.
 	fs.StringVar(&cfg.APIKey, "api-key", "", "require this bearer key on /v1/* (env MLAI_API_KEY; empty = open, loopback only)")
 	fs.Parse(args)
@@ -82,10 +88,17 @@ func initFlags(args []string) {
 	}
 }
 
-// validateConfig refuses to listen beyond loopback without an API key.
+// validateConfig refuses to listen beyond loopback without an API key, and
+// without the explicit opt-in to plain HTTP (the bridge speaks no TLS).
 func validateConfig(c config) error {
-	if c.APIKey == "" && !isLoopbackHost(c.Bind) {
+	if isLoopbackHost(c.Bind) {
+		return nil
+	}
+	if c.APIKey == "" {
 		return fmt.Errorf("bind address %q is not loopback: set MLAI_API_KEY (or -api-key) to expose the bridge", c.Bind)
+	}
+	if !c.AllowPlainHTTP {
+		return fmt.Errorf("bind address %q is not loopback and the bridge serves plain HTTP, so the API key and request bodies would travel in clear: keep the bridge on 127.0.0.1 behind a TLS reverse proxy, or set MLAI_ALLOW_PLAIN_HTTP=true (-allow-plain-http) on a trusted network", c.Bind)
 	}
 	return nil
 }
@@ -153,6 +166,10 @@ type server struct {
 	healthMu sync.Mutex
 	healthAt time.Time
 	healthOK bool
+
+	// discoverySecret is set by serveMain when it wrote the discovery file; it
+	// lets /healthz prove which process owns the file. Empty: no proof.
+	discoverySecret string
 }
 
 func newServer() *server {
@@ -196,6 +213,7 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		cmd := exec.CommandContext(ctx, cfg.MLAI, "whoami")
 		cmd.Env = childEnv()
 		cmd.WaitDelay = 5 * time.Second
+		hideConsole(cmd)
 		out, _ := cmd.CombinedOutput()
 		cancel()
 		s.healthOK = strings.HasPrefix(strings.TrimSpace(string(out)), "Signed in")
@@ -208,13 +226,17 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if !signedIn {
 		status = "degraded"
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	doc := map[string]any{
 		"status":    status,
 		"version":   version,
 		"uptime_s":  int(time.Since(startedAt).Seconds()),
 		"signed_in": signedIn,
-	})
+	}
+	if c := r.URL.Query().Get("challenge"); s.discoverySecret != "" && challengePattern.MatchString(c) {
+		doc["proof"] = hex.EncodeToString(discoveryMAC(s.discoverySecret, c))
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(doc)
 }
 
 func (s *server) handleMetrics(w http.ResponseWriter, r *http.Request) {
@@ -238,18 +260,54 @@ func maxInt(a, b int) int {
 
 var requestIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
+// maxInflight caps the POST /v1/* requests the bridge works on at once. The
+// others wait up to cfg.QueueWait for a slot before their body is read.
+var maxInflight = 32
+
 func withMiddleware(next http.Handler) http.Handler {
+	slots := make(chan struct{}, maxInt(1, maxInflight))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.Header.Get("X-Request-Id")
 		if !requestIDPattern.MatchString(id) {
 			id = fmt.Sprintf("req_%d", time.Now().UnixNano())
 		}
 		w.Header().Set("X-Request-Id", id)
-		r.Body = http.MaxBytesReader(w, r.Body, 16<<20)
+		// Overall bound on writing the response; streaming code renews it (stream.go).
+		http.NewResponseController(w).SetWriteDeadline(time.Now().Add(cfg.Timeout + time.Minute))
 		t0 := time.Now()
+		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/") {
+			if !takeSlot(r.Context(), slots) {
+				writeJSONAuthError(w, r, errBusy)
+				return
+			}
+			defer func() { <-slots }()
+			// Time spent queued does not count against sending the body.
+			http.NewResponseController(w).SetReadDeadline(time.Now().Add(bodyReadTimeout))
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 16<<20)
 		next.ServeHTTP(w, r)
 		logger.Printf("%s %q %q %s", id, r.Method, r.URL.Path, time.Since(t0).Round(time.Millisecond))
 	})
+}
+
+// takeSlot takes a free slot at once, or waits up to cfg.QueueWait for one.
+// A free slot always wins: with a zero wait, select would pick at random.
+func takeSlot(ctx context.Context, slots chan struct{}) bool {
+	select {
+	case slots <- struct{}{}:
+		return true
+	default:
+	}
+	wait := time.NewTimer(cfg.QueueWait)
+	defer wait.Stop()
+	select {
+	case slots <- struct{}{}:
+		return true
+	case <-wait.C:
+		return false
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // bodyReadTimeout bounds how long a client may take to send a request body.
@@ -356,6 +414,23 @@ func serveMain(args []string) {
 	s := newServer()
 	srv := newHTTPServer(s)
 
+	ln, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		logger.Fatalf("listen: %v", err)
+	}
+	// Only a loopback bridge is discoverable: the launcher sends its key there.
+	if isLoopbackHost(cfg.Bind) {
+		port := cfg.Port
+		if ta, ok := ln.Addr().(*net.TCPAddr); ok {
+			port = ta.Port
+		}
+		if secret, err := publishDiscovery(cfg.Bind, port); err != nil {
+			logger.Printf("discovery file not written (claude/codex will start a private bridge): %v", err)
+		} else {
+			s.discoverySecret = secret
+		}
+	}
+
 	go func() {
 		auth := "open"
 		if cfg.APIKey != "" {
@@ -363,7 +438,7 @@ func serveMain(args []string) {
 		}
 		logger.Printf("mlai-bridge %s on http://%s  (mlai=%s model=%s concurrency=%d cache=%s auth=%s)",
 			version, srv.Addr, cfg.MLAI, cfg.DefaultModel, cap(s.sem), cfg.CacheTTL, auth)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			logger.Fatalf("listen: %v", err)
 		}
 	}()
@@ -372,5 +447,102 @@ func serveMain(args []string) {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 	logger.Print("shutting down")
+	if s.discoverySecret != "" {
+		removeDiscovery(s.discoverySecret)
+	}
 	s.shutdown(srv)
+}
+
+// ---------- discovery ----------
+
+// discoveryFile is where `serve` announces itself to the launcher. Empty means
+// ~/mlai-bridge/serve.json, looked up when needed. Tests set it.
+var discoveryFile string
+
+func discoveryPath() string {
+	if discoveryFile != "" {
+		return discoveryFile
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, "mlai-bridge", "serve.json")
+}
+
+// discoveryDoc is the content of the discovery file. The secret never leaves
+// the file: /healthz only returns an HMAC made with it.
+type discoveryDoc struct {
+	URL    string `json:"url"`
+	PID    int    `json:"pid"`
+	Secret string `json:"secret"`
+}
+
+// challengePattern is what /healthz?challenge= accepts: 16 to 128 hex digits.
+var challengePattern = regexp.MustCompile(`^[0-9A-Fa-f]{16,128}$`)
+
+// discoveryMAC is HMAC-SHA256 keyed with the secret string, over the challenge string.
+func discoveryMAC(secret, challenge string) []byte {
+	m := hmac.New(sha256.New, []byte(secret))
+	m.Write([]byte(challenge))
+	return m.Sum(nil)
+}
+
+// publishDiscovery writes the discovery file for a bridge listening on
+// bind:port and returns its secret. The file is written to a temporary file in
+// the same directory and renamed, so a reader never sees a partial file.
+func publishDiscovery(bind string, port int) (string, error) {
+	path := discoveryPath()
+	if path == "" {
+		return "", errors.New("no home directory")
+	}
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	secret := hex.EncodeToString(raw)
+	doc, err := json.Marshal(discoveryDoc{
+		URL:    "http://" + net.JoinHostPort(bind, strconv.Itoa(port)),
+		PID:    os.Getpid(),
+		Secret: secret,
+	})
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	tmp, err := os.CreateTemp(dir, ".serve-*.tmp")
+	if err != nil {
+		return "", err
+	}
+	_, werr := tmp.Write(doc)
+	cerr := tmp.Close()
+	if err := errors.Join(werr, cerr, os.Chmod(tmp.Name(), 0o600)); err != nil {
+		os.Remove(tmp.Name())
+		return "", err
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		os.Remove(tmp.Name())
+		return "", err
+	}
+	return secret, nil
+}
+
+// removeDiscovery deletes the discovery file if it still holds secret, so a
+// newer bridge's file is left alone.
+func removeDiscovery(secret string) {
+	path := discoveryPath()
+	if path == "" {
+		return
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var doc discoveryDoc
+	if json.Unmarshal(raw, &doc) == nil && doc.Secret == secret {
+		os.Remove(path)
+	}
 }

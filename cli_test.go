@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -84,18 +85,19 @@ func cliSandbox(t *testing.T) string {
 		t.Setenv(k, "")
 	}
 	// Never pick up a real bridge running on this machine.
-	old := sharedBridgeURL
-	sharedBridgeURL = "http://127.0.0.1:9"
-	t.Cleanup(func() { sharedBridgeURL = old })
+	old := discoveryFile
+	discoveryFile = filepath.Join(t.TempDir(), "none", "serve.json")
+	t.Cleanup(func() { discoveryFile = old })
 	return home
 }
 
 func TestLaunchUsesARunningBridge(t *testing.T) {
 	cliSandbox(t)
+	secret := testSecret(t)
 	bridge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/healthz":
-			fmt.Fprint(w, `{"status":"ok","version":"test"}`)
+			fmt.Fprintf(w, `{"status":"ok","version":"test","proof":%q}`, testProof(secret, r.URL.Query().Get("challenge")))
 		case "/v1/models":
 			if r.Header.Get("Authorization") != "Bearer "+cliKey {
 				w.WriteHeader(401)
@@ -105,8 +107,12 @@ func TestLaunchUsesARunningBridge(t *testing.T) {
 		}
 	}))
 	defer bridge.Close()
-	sharedBridgeURL = bridge.URL
+
 	var base, key string
+	if runningBridge(&base, &key) {
+		t.Error("without a discovery file no bridge may be used")
+	}
+	writeTestDiscovery(t, bridge.URL, secret)
 	if runningBridge(&base, &key) {
 		t.Error("a bridge that rejects the (missing) key must not be used")
 	}
@@ -114,9 +120,68 @@ func TestLaunchUsesARunningBridge(t *testing.T) {
 	if !runningBridge(&base, &key) || base != bridge.URL || key != cliKey {
 		t.Errorf("running bridge not used: %q %q", base, key)
 	}
-	sharedBridgeURL = "http://127.0.0.1:9"
+
+	// The file holds a different secret than the bridge proves with.
+	writeTestDiscovery(t, bridge.URL, testSecret(t))
+	base, key = "", ""
+	if runningBridge(&base, &key) || base != "" || key != "" {
+		t.Error("a proof made with another secret must be refused")
+	}
+
+	// A stale file: nothing listens there any more.
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closedURL := closed.URL
+	closed.Close()
+	writeTestDiscovery(t, closedURL, secret)
 	if runningBridge(&base, &key) {
 		t.Error("no bridge is listening there")
+	}
+
+	// A file that points beyond loopback is never followed.
+	writeTestDiscovery(t, "http://192.0.2.1:8197", secret)
+	if runningBridge(&base, &key) {
+		t.Error("a non-loopback discovery URL must be refused")
+	}
+}
+
+func TestLaunchNeverSendsTheKeyToAnImpostor(t *testing.T) {
+	cliSandbox(t)
+	t.Setenv("MLAI_API_KEY", cliKey)
+	secret := testSecret(t)
+	var sawAuth atomic.Bool
+	for name, health := range map[string]func(w http.ResponseWriter, r *http.Request){
+		"wrong proof": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, `{"status":"ok","version":"test","proof":%q}`, testProof("not-the-secret", r.URL.Query().Get("challenge")))
+		},
+		"no proof": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"status":"ok","version":"test"}`)
+		},
+		"proof that is not hex": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"status":"ok","version":"test","proof":"zz"}`)
+		},
+		"replayed proof": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, `{"status":"ok","version":"test","proof":%q}`, testProof(secret, strings.Repeat("0", 64)))
+		},
+	} {
+		impostor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != "" || r.Header.Get("x-api-key") != "" {
+				sawAuth.Store(true)
+			}
+			if r.URL.Path == "/healthz" {
+				health(w, r)
+				return
+			}
+			fmt.Fprint(w, `{"data":[]}`)
+		}))
+		writeTestDiscovery(t, impostor.URL, secret)
+		var base, key string
+		if runningBridge(&base, &key) || base != "" || key != "" {
+			t.Errorf("%s: the impostor was used", name)
+		}
+		impostor.Close()
+	}
+	if sawAuth.Load() {
+		t.Error("an impostor received an Authorization header")
 	}
 }
 
@@ -789,5 +854,37 @@ func TestDoctorReportsYesNoOnly(t *testing.T) {
 	noClient(t)
 	if code := runDoctor(&out); code != 1 || !regexp.MustCompile(`mlai in PATH:\s+no`).MatchString(out.String()) {
 		t.Errorf("without mlai: code %d\n%s", code, out.String())
+	}
+}
+
+func TestSettingsGoToAFileForBatchShims(t *testing.T) {
+	plan := planLaunch("claude", "http://127.0.0.1:5000", cliKey, "m-1")
+	args, cleanup, err := settingsForShim(`C:\tools\claude.cmd`, plan.Args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(args) != 2 || args[0] != "--settings" || strings.ContainsAny(args[1], cmdUnsafe) {
+		t.Fatalf("args = %v, want --settings <plain path>", args)
+	}
+	raw, err := os.ReadFile(args[1])
+	if err != nil || string(raw) != plan.Args[1] {
+		t.Fatalf("settings file holds %q (%v), want the JSON", raw, err)
+	}
+	if strings.Contains(string(raw), cliKey) {
+		t.Error("the key must not be written to the settings file")
+	}
+	cleanup()
+	if _, err := os.Stat(args[1]); !os.IsNotExist(err) {
+		t.Error("cleanup left the settings file behind")
+	}
+	// A real executable keeps the inline JSON.
+	same, cleanup2, err := settingsForShim(`C:\tools\claude.exe`, plan.Args)
+	cleanup2()
+	if err != nil || !slices.Equal(same, plan.Args) {
+		t.Errorf("exe args = %v, %v", same, err)
+	}
+	// The whole launch path accepts a .cmd shim with no other arguments.
+	if _, cargs, err := prepareClient(`C:\tools\claude.cmd`, args); err != nil {
+		t.Errorf("prepareClient refused the shim: %v (%v)", err, cargs)
 	}
 }

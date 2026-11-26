@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -49,7 +50,8 @@ Usage:
   mlai-bridge help
 
 claude and codex use, in this order: the bridge at --url or MLAI_BRIDGE_URL;
-a bridge already running on 127.0.0.1:8197 ("serve"); otherwise a private
+a bridge started with "serve" on this machine (found through
+~/mlai-bridge/serve.json and verified before any key is sent); otherwise a private
 bridge on 127.0.0.1 with a random key for the lifetime of the client (log:
 ~/mlai-bridge/wrap.log). The key for a running bridge comes from MLAI_API_KEY.
 Run "serve" once and leave it running so every session shares one bridge.
@@ -308,23 +310,55 @@ func bridgeURL(raw string) (string, error) {
 	return u.Scheme + "://" + u.Host + path, nil
 }
 
-// sharedBridgeURL is where `mlai-wrap serve` listens by default; tests move it.
-var sharedBridgeURL = defaultBridgeURL
-
-// runningBridge reports whether a bridge is already serving at sharedBridgeURL
-// and accepts MLAI_API_KEY (or needs no key); it fills base and key if so.
+// runningBridge reports whether a bridge started with `serve` on this machine
+// is running and accepts MLAI_API_KEY (or needs no key); it fills base and key
+// if so. Nothing about the port is trusted: the bridge announces itself in the
+// discovery file (0600, written by `serve`) with a secret, and must answer a
+// fresh challenge with an HMAC made from that secret before any key is sent.
 func runningBridge(base, key *string) bool {
-	if _, err := checkHealth(sharedBridgeURL); err != nil {
+	path := discoveryPath()
+	if path == "" {
 		return false
 	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var doc discoveryDoc
+	if json.Unmarshal(raw, &doc) != nil || doc.Secret == "" {
+		return false
+	}
+	u, err := url.Parse(doc.URL)
+	if err != nil || u.Scheme != "http" || u.User != nil {
+		return false
+	}
+	if host, _, err := net.SplitHostPort(u.Host); err != nil || !isLoopbackHost(host) {
+		return false
+	}
+	root := "http://" + u.Host
+
+	nonce := make([]byte, 32)
+	if _, err := rand.Read(nonce); err != nil {
+		return false
+	}
+	challenge := hex.EncodeToString(nonce)
+	var h healthDoc
+	if err := getJSON(root+"/healthz?challenge="+challenge, "", healthTimeout, &h); err != nil {
+		return false
+	}
+	proof, err := hex.DecodeString(h.Proof)
+	if err != nil || h.Version == "" || h.Status == "" || !hmac.Equal(proof, discoveryMAC(doc.Secret, challenge)) {
+		return false
+	}
+
 	k := strings.TrimSpace(os.Getenv("MLAI_API_KEY"))
 	var models struct {
 		Data []json.RawMessage `json:"data"`
 	}
-	if err := getJSON(sharedBridgeURL+"/v1/models", k, 2*time.Second, &models); err != nil {
+	if err := getJSON(root+"/v1/models", k, 2*time.Second, &models); err != nil {
 		return false // e.g. it wants a key we do not have: start a private bridge instead
 	}
-	*base, *key = sharedBridgeURL, k
+	*base, *key = root, k
 	return true
 }
 
@@ -342,6 +376,7 @@ type healthDoc struct {
 	Version  string `json:"version"`
 	Uptime   int    `json:"uptime_s"`
 	SignedIn bool   `json:"signed_in"`
+	Proof    string `json:"proof"`
 }
 
 func getJSON(rawURL, key string, timeout time.Duration, v any) error {
@@ -599,12 +634,51 @@ func runLaunch(kind string, args []string, stdout, stderr io.Writer) int {
 		plan.printDry(stdout, path, o.rest)
 		return 0
 	}
-	path, cargs, err := prepareClient(path, append(append([]string(nil), plan.Args...), o.rest...))
+	pargs, cleanup, err := settingsForShim(path, plan.Args)
+	if err != nil {
+		fmt.Fprintf(stderr, "mlai-bridge %s: %v\n", kind, err)
+		return 1
+	}
+	defer cleanup()
+	path, cargs, err := prepareClient(path, append(pargs, o.rest...))
 	if err != nil {
 		fmt.Fprintf(stderr, "mlai-bridge %s: %v\n", kind, err)
 		return 2
 	}
 	return runChild(path, cargs, plan.environ(os.Environ()), stderr)
+}
+
+// settingsForShim moves an inline `--settings <json>` into a temporary file
+// when the client is a .cmd/.bat shim: cmd.exe cannot be given the JSON's
+// double quotes safely, but Claude Code accepts a settings file path just the
+// same. The file holds no key. cleanup removes it after the client exits.
+func settingsForShim(path string, args []string) ([]string, func(), error) {
+	ext := strings.ToLower(filepath.Ext(path))
+	out := append([]string(nil), args...)
+	if ext != ".cmd" && ext != ".bat" {
+		return out, func() {}, nil
+	}
+	for i := 0; i+1 < len(out); i++ {
+		if out[i] != "--settings" || !strings.HasPrefix(out[i+1], "{") {
+			continue
+		}
+		f, err := os.CreateTemp("", "mlai-wrap-settings-*.json")
+		if err != nil {
+			return nil, nil, err
+		}
+		_, werr := f.WriteString(out[i+1])
+		if cerr := f.Close(); werr == nil {
+			werr = cerr
+		}
+		if werr != nil {
+			os.Remove(f.Name())
+			return nil, nil, werr
+		}
+		out[i+1] = f.Name()
+		name := f.Name()
+		return out, func() { os.Remove(name) }, nil
+	}
+	return out, func() {}, nil
 }
 
 // ---------- env, models, status, doctor ----------
@@ -769,6 +843,7 @@ func runDoctor(stdout io.Writer) int {
 		cmd := exec.CommandContext(ctx, mlaiPath, "whoami")
 		cmd.Env = childEnv()
 		cmd.WaitDelay = 5 * time.Second
+		hideConsole(cmd)
 		out, _ := cmd.CombinedOutput()
 		signedIn = strings.HasPrefix(strings.TrimSpace(string(out)), "Signed in")
 	}
