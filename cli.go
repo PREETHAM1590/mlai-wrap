@@ -306,6 +306,26 @@ func bridgeURL(raw string) (string, error) {
 	return u.Scheme + "://" + u.Host + path, nil
 }
 
+// sharedBridgeURL is where `mlai-wrap serve` listens by default; tests move it.
+var sharedBridgeURL = defaultBridgeURL
+
+// runningBridge reports whether a bridge is already serving at sharedBridgeURL
+// and accepts MLAI_API_KEY (or needs no key); it fills base and key if so.
+func runningBridge(base, key *string) bool {
+	if _, err := checkHealth(sharedBridgeURL); err != nil {
+		return false
+	}
+	k := strings.TrimSpace(os.Getenv("MLAI_API_KEY"))
+	var models struct {
+		Data []json.RawMessage `json:"data"`
+	}
+	if err := getJSON(sharedBridgeURL+"/v1/models", k, 2*time.Second, &models); err != nil {
+		return false // e.g. it wants a key we do not have: start a private bridge instead
+	}
+	*base, *key = sharedBridgeURL, k
+	return true
+}
+
 // resolveBridgeURL picks flag value, then MLAI_BRIDGE_URL, then the default.
 func resolveBridgeURL(flagVal string) (string, error) {
 	raw := flagVal
@@ -555,6 +575,10 @@ func runLaunch(kind string, args []string, stdout, stderr io.Writer) int {
 		}
 	case o.dryRun:
 		base = "http://127.0.0.1:<port>"
+	case runningBridge(&base, &key):
+		// Like `omniroute launch`: share the bridge `mlai-wrap serve` keeps
+		// running, with its one keeper, instead of starting another.
+		fmt.Fprintf(stderr, "mlai-bridge %s: using the bridge at %s\n", kind, base)
 	default:
 		var stop func()
 		if base, key, stop, err = startWrapServer(); err != nil {

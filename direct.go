@@ -34,8 +34,10 @@ const (
 const tokenTTL = 80 * time.Minute
 
 // keeperCooldown is the minimum time between two keeper spawns, success or not. It
-// doubles with every failure in a row (up to 32x).
-var keeperCooldown = 60 * time.Second
+// doubles with every failure in a row (up to 32x). It is short because mlai
+// 0.3.x ends a keeper run (and its token) after about 40 s, and a keeper start
+// opens no windows now that it is a foreground `mlai -p`.
+var keeperCooldown = 10 * time.Second
 
 // closeWait bounds how long Close waits for a keeper run that is being opened.
 var closeWait = 15 * time.Second
@@ -64,6 +66,8 @@ type runKeeper struct {
 	// version cannot serve direct mode, and every new keeper run costs a burst
 	// of console windows on Windows. Remembered per CLI binary in unsupportedFile.
 	unsupported bool
+	// proc is the running keeper process, stopped with the run it keeps.
+	proc *exec.Cmd
 }
 
 // errNoRunToken means the keeper's run ended without writing a run token.
@@ -318,17 +322,26 @@ func (k *runKeeper) spawn() (string, string, error) {
 			seen[e.Name()] = true
 		}
 	}
-	cmd := exec.Command(k.mlai, "--bg", "-y", keeperPrompt)
+	// A foreground `mlai -p` child, not `mlai --bg`: on Windows every --bg run
+	// opens a burst of console windows (Windows Terminal tabs). -y comes first so
+	// the keeper is easy to tell apart from prompt runs; the task is on stdin.
+	cmd := exec.Command(k.mlai, "-y", "-p", "--output-format", "stream-json", "--no-tui")
 	cmd.Dir = k.dir
 	cmd.Env = childEnv()
+	cmd.Stdin = strings.NewReader(keeperPrompt)
 	out := &cappedBuffer{max: 16 << 10}
 	cmd.Stdout = out
 	cmd.Stderr = out
+	setProcGroup(cmd)
 	cmd.WaitDelay = 5 * time.Second
 	if err := cmd.Start(); err != nil {
 		return "", "", fmt.Errorf("start keeper: %w", err)
 	}
-	go cmd.Wait() // reap; the run lives on the server
+	exited := make(chan struct{})
+	go func() { cmd.Wait(); close(exited) }()
+	k.mu.Lock()
+	k.proc = cmd
+	k.mu.Unlock()
 
 	deadline := time.Now().Add(90 * time.Second)
 	for time.Now().Before(deadline) {
@@ -336,16 +349,24 @@ func (k *runKeeper) spawn() (string, string, error) {
 			logger.Printf("run token refreshed (keeper pid %d, len %d)", cmd.Process.Pid, len(tok))
 			return tok, id, nil
 		}
-		if id := endedKeeperRun(k.dir, seen); id != "" {
+		ended := endedKeeperRun(k.dir, seen)
+		select {
+		case <-exited:
+			if ended == "" {
+				ended = "keeper process exited"
+			}
+		default:
+		}
+		if ended != "" {
 			// Look once more: the token may have been written just before the end.
 			if tok, tid, ok := tokenFromNewestSession(start, k.dir, seen); ok {
 				return tok, tid, nil
 			}
-			return "", "", fmt.Errorf("%w (run %s)", errNoRunToken, id)
+			return "", "", fmt.Errorf("%w (run %s)", errNoRunToken, ended)
 		}
 		time.Sleep(750 * time.Millisecond)
 	}
-	cmd.Process.Kill()
+	killTree(cmd)
 	return "", "", fmt.Errorf("no run token appeared within 90s: %s", strings.TrimSpace(out.String()))
 }
 
@@ -379,6 +400,13 @@ func endedKeeperRun(dir string, seen map[string]bool) string {
 func (k *runKeeper) stop(id string) {
 	if id == "" || strings.HasPrefix(id, "-") {
 		return
+	}
+	k.mu.Lock()
+	proc := k.proc
+	k.proc = nil
+	k.mu.Unlock()
+	if proc != nil && proc.ProcessState == nil {
+		killTree(proc)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

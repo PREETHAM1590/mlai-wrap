@@ -68,7 +68,8 @@ func runStub(args []string) int {
 		fmt.Println("0.0.0-stub")
 	case args[0] == "whoami":
 		fmt.Println("Signed in as stub@example.test")
-	case args[0] == "--bg":
+	case args[0] == "-y": // the keeper: mlai -y -p …, task on stdin
+		io.ReadAll(os.Stdin)
 		return stubBackground()
 	case slices.Contains(args, "-p"):
 		return stubPrompt()
@@ -81,7 +82,7 @@ func stubResult(text string) {
 	fmt.Println(string(b))
 }
 
-// stubBackground mimics `mlai --bg`: it records a session whose token the
+// stubBackground mimics the keeper run (formerly `mlai --bg`): it records a session whose token the
 // keeper can pick up.
 func stubBackground() int {
 	if os.Getenv("STUB_BG") == "fail" {
@@ -924,8 +925,8 @@ func TestKeeperStartsOneRunForCancelledCallers(t *testing.T) {
 		tok, _, busy := keeperState(k)
 		return !busy && tok != ""
 	})
-	if n := env.count(t, "--bg"); n != 1 {
-		t.Errorf("--bg ran %d times for %d callers, want 1", n, callers)
+	if n := env.count(t, "-y"); n != 1 {
+		t.Errorf("keeper ran %d times for %d callers, want 1", n, callers)
 	}
 	tok, fails, _ := keeperState(k)
 	if !strings.HasPrefix(tok, "mlrun_") || fails != 0 {
@@ -938,8 +939,8 @@ func TestKeeperStartsOneRunForCancelledCallers(t *testing.T) {
 	if _, err := k.Refresh(ctx, tok); err == nil || !strings.Contains(err.Error(), "cooling down") {
 		t.Errorf("second refresh: err = %v, want a cooldown error", err)
 	}
-	if n := env.count(t, "--bg"); n != 1 {
-		t.Errorf("--bg ran %d times after the cooldown refusal, want 1", n)
+	if n := env.count(t, "-y"); n != 1 {
+		t.Errorf("keeper ran %d times after the cooldown refusal, want 1", n)
 	}
 }
 
@@ -1100,8 +1101,8 @@ func TestKeeperSuccessResetsBackoff(t *testing.T) {
 	if _, fails, _ := keeperState(k); fails != 0 {
 		t.Errorf("fails = %d after a successful spawn, want 0", fails)
 	}
-	if n := env.count(t, "--bg"); n != 1 {
-		t.Errorf("--bg ran %d times, want 1", n)
+	if n := env.count(t, "-y"); n != 1 {
+		t.Errorf("keeper ran %d times, want 1", n)
 	}
 }
 
@@ -1216,8 +1217,8 @@ func TestDirectRefreshesOnceOn401(t *testing.T) {
 	if len(tokens) != 2 || tokens[0] == tokens[1] {
 		t.Errorf("gateway calls = %d, want 2 with different tokens", len(tokens))
 	}
-	if n := env.count(t, "--bg"); n != 1 {
-		t.Errorf("--bg ran %d times, want 1", n)
+	if n := env.count(t, "-y"); n != 1 {
+		t.Errorf("keeper ran %d times, want 1", n)
 	}
 }
 

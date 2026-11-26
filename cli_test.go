@@ -83,7 +83,41 @@ func cliSandbox(t *testing.T) string {
 	for _, k := range []string{"MLAI_BRIDGE_URL", "MLAI_MODEL", "MLAI_API_KEY", "MLAI_BIND", "MLAI_WORKDIR", "WRAP_STUB", "WRAP_STUB_OUT", "WRAP_STUB_EXIT", "WRAP_STUB_SIGNAL"} {
 		t.Setenv(k, "")
 	}
+	// Never pick up a real bridge running on this machine.
+	old := sharedBridgeURL
+	sharedBridgeURL = "http://127.0.0.1:9"
+	t.Cleanup(func() { sharedBridgeURL = old })
 	return home
+}
+
+func TestLaunchUsesARunningBridge(t *testing.T) {
+	cliSandbox(t)
+	bridge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/healthz":
+			fmt.Fprint(w, `{"status":"ok","version":"test"}`)
+		case "/v1/models":
+			if r.Header.Get("Authorization") != "Bearer "+cliKey {
+				w.WriteHeader(401)
+				return
+			}
+			fmt.Fprint(w, `{"data":[]}`)
+		}
+	}))
+	defer bridge.Close()
+	sharedBridgeURL = bridge.URL
+	var base, key string
+	if runningBridge(&base, &key) {
+		t.Error("a bridge that rejects the (missing) key must not be used")
+	}
+	t.Setenv("MLAI_API_KEY", cliKey)
+	if !runningBridge(&base, &key) || base != bridge.URL || key != cliKey {
+		t.Errorf("running bridge not used: %q %q", base, key)
+	}
+	sharedBridgeURL = "http://127.0.0.1:9"
+	if runningBridge(&base, &key) {
+		t.Error("no bridge is listening there")
+	}
 }
 
 func setLookPath(t *testing.T, f func(string) (string, error)) {

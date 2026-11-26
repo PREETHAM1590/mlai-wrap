@@ -226,8 +226,8 @@ func TestKeeperStopsWhenTheRunGivesNoToken(t *testing.T) {
 	if _, err := k2.Refresh(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "direct mode is off") {
 		t.Errorf("new keeper: %v", err)
 	}
-	if n := env.count(t, "--bg"); n != 1 {
-		t.Errorf("--bg ran %d times, want 1", n)
+	if n := env.count(t, "-y"); n != 1 {
+		t.Errorf("keeper ran %d times, want 1", n)
 	}
 
 	// Another CLI binary (an update) gets one new try.

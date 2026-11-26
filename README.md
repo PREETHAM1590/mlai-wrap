@@ -47,12 +47,17 @@ can talk to it.
 ## Direct mode and the run keeper
 
 The gateway accepts a per-run bearer token (`mlrun_…`) that only the CLI can mint, and it
-dies when the run ends. The bridge therefore keeps **one background CLI run alive**
-(`mlai --bg -y "Run the shell command \`sleep 5400\`…"` in `<workdir>/.keeper`) and reuses
-that run's token from `~/.mlai/sessions/<id>/engine/mcp.json`. When the gateway answers
+dies when the run ends. The bridge therefore keeps **one CLI run alive** (a foreground
+`mlai -y -p` child with a long `sleep` task, in `<workdir>/.keeper`) and reuses that run's
+token from `~/.mlai/sessions/<id>/engine/mcp.json`. When the gateway answers
 `409 run_finished`, the bridge opens a fresh keeper run and retries the request once.
-Keepers start one at a time, at least 60 s apart (longer after repeated failures), and a keeper
+Keepers start one at a time, at least 10 s apart (longer after repeated failures), and a keeper
 whose token the gateway rejected is stopped before a new one starts.
+
+With mlai 0.3.27 the agent moves the `sleep` to the background and ends the run after about
+40 s, so the token only lasts that long and the bridge opens a new run about once a minute
+while you work; a request that comes in while a new run is starting waits for it (up to 90 s)
+or falls back to the CLI. Each keeper run is one ML AI Code run on your plan.
 
 Direct requests are limited by `-direct-concurrency` (default 8) and by `-timeout`, the same
 wall-clock limit the CLI path uses.
@@ -198,8 +203,20 @@ mlai-wrap codex -- exec "explain this repo"
 mlai-wrap claude --dry-run                # show the command and variable names only
 ```
 
+**Recommended: keep one bridge running** (like OmniRoute's gateway) and point every session
+at it, so all of them share one keeper:
+
+```bash
+mlai-wrap serve                 # in its own terminal, or as a service; 127.0.0.1:8197
+mlai-wrap claude -m pixis       # finds the running bridge by itself
+mlai-wrap codex -m pixis
+```
+
+`mlai-wrap claude` and `codex` use a bridge already answering on `127.0.0.1:8197` (with
+`MLAI_API_KEY` if that bridge needs a key).
+
 `mlai-wrap` is the same binary (`make install` links it); `mlai-bridge claude` works too. On
-Windows copy `mlai-bridge.exe` to `mlai-wrap.exe`. The launcher starts a private bridge on
+Windows copy `mlai-bridge.exe` to `mlai-wrap.exe`. Without a running bridge the launcher starts a private bridge on
 `127.0.0.1` with a random key, runs the client with it and stops the bridge when the client
 exits (log: `~/mlai-bridge/wrap.log`). It sets variables (and `-c` options for Codex) for that
 process only: no Claude Code or Codex file is changed. Use `--url` or `MLAI_BRIDGE_URL`, with
@@ -370,12 +387,11 @@ guarantee, so validate arguments on your side.
   itself with `rmdir`.
 - **Engine hook warnings.** mlai 0.3.x sometimes reports "A Stop hook failed to execute: spawn
   EPERM" as its answer; the bridge then returns the model's own reply instead.
-- **Windows: a burst of terminal tabs.** Each `mlai --bg` run (the keeper that direct mode
-  uses) makes Windows Terminal open and close about 30 tabs in 20 s; `mlai --bg` does the
-  same when you run it yourself. When a keeper run ends without a run token, as with mlai
-  0.3.27, the bridge records that for this mlai version in `~/mlai-bridge/workspace/.keeper/unsupported`
-  and does not start the keeper again until `mlai --version` changes. Set `MLAI_DIRECT=false`
-  to skip the keeper entirely.
+- **Windows: no terminal tabs.** `mlai --bg` makes Windows Terminal open and close about 30
+  tabs every time it runs, so the keeper is a foreground `mlai -p` child of the bridge, which
+  opens none. When a keeper run ends without a run token, the bridge records that for this
+  mlai version in `~/mlai-bridge/workspace/.keeper/unsupported` and does not start the keeper
+  again until `mlai --version` changes. Set `MLAI_DIRECT=false` to skip the keeper entirely.
 - The CLI runs the full agent harness: expect ~14k prompt tokens of system context per
   call. The Infinite plan covers Pixis/Forge without a meter; other models spend credits.
 - `--mode ask` is used so the agent answers instead of editing files. The prompt is sent to
