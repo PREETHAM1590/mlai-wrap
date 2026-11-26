@@ -79,14 +79,21 @@ jobs:
         with:
           node-version: "22"
           registry-url: https://registry.npmjs.org
+      - name: Update npm (trusted publishing needs 11.5.1 or later)
+        run: npm install -g npm@11
       - name: Build npm packages
         run: node scripts/npm-build.mjs "${GITHUB_REF_NAME#v}" dist > "$RUNNER_TEMP/npm-dirs.txt"
+      # No token: npm trusts this workflow (Trusted Publishing, set per package on npmjs.com).
       - name: Publish npm packages
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           tag=latest
           case "$GITHUB_REF_NAME" in *-*) tag=next ;; esac # prereleases never become "latest"
           while read -r dir; do
+            name=$(node -p "require('$dir/package.json').name")
+            version=$(node -p "require('$dir/package.json').version")
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version is already published; skipping"
+              continue
+            fi
             (cd "$dir" && npm publish --access public --provenance --tag "$tag")
           done < "$RUNNER_TEMP/npm-dirs.txt"

@@ -74,8 +74,11 @@ Then update `docs/MODELS.md` (id, display name, plan, notes) **and** the `ids` s
 
 Tag the commit `vX.Y.Z` and push the tag. CI builds the five binaries, creates the GitHub
 release, then publishes `mlai-wrap` and the `@mlai-wrap/*` platform packages to npm with version
-`X.Y.Z` (the version in `npm/mlai-wrap/package.json` stays `0.0.0`). The repository needs an
-`NPM_TOKEN` secret that can publish to the `mlai-wrap` package and the `@mlai-wrap` scope.
+`X.Y.Z` (the version in `npm/mlai-wrap/package.json` stays `0.0.0`). A tag with a `-`
+(`v0.2.0-beta.1`) is published under the `next` dist-tag. Publishing uses npm Trusted
+Publishing, so no token is stored: each of the six packages has a trusted publisher set to
+this repository and `ci.yml`. A version that is already on npm is skipped, so a failed run can
+be re-run.
 To check the packages locally, build the binaries into `dist/` as named in
 `.github/workflows/ci.yml` and run `node scripts/npm-build.mjs X.Y.Z dist`.
 
