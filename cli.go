@@ -48,10 +48,12 @@ Usage:
   mlai-bridge version
   mlai-bridge help
 
-claude and codex use the bridge at --url or MLAI_BRIDGE_URL (key from
-MLAI_API_KEY). Without either, they run a private bridge on 127.0.0.1 with a
-random key for the lifetime of the client; its log is ~/mlai-bridge/wrap.log.
-The same binary also works as "mlai-wrap".
+claude and codex use, in this order: the bridge at --url or MLAI_BRIDGE_URL;
+a bridge already running on 127.0.0.1:8197 ("serve"); otherwise a private
+bridge on 127.0.0.1 with a random key for the lifetime of the client (log:
+~/mlai-bridge/wrap.log). The key for a running bridge comes from MLAI_API_KEY.
+Run "serve" once and leave it running so every session shares one bridge.
+The same binary also works as "mlai-wrap". Docs: docs/COMMANDS.md
 `
 
 // lookPath is replaced in tests.
@@ -361,10 +363,14 @@ func getJSON(rawURL, key string, timeout time.Duration, v any) error {
 	return json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(v)
 }
 
-// checkHealth asks GET <base>/healthz (2s) and requires a bridge-shaped answer.
+// healthTimeout covers a /healthz that runs `mlai whoami` (its first call after
+// the 60 s cache runs out takes a few seconds). A closed port fails at once.
+var healthTimeout = 15 * time.Second
+
+// checkHealth asks GET <base>/healthz and requires a bridge-shaped answer.
 func checkHealth(base string) (healthDoc, error) {
 	var h healthDoc
-	if err := getJSON(base+"/healthz", "", 2*time.Second, &h); err != nil {
+	if err := getJSON(base+"/healthz", "", healthTimeout, &h); err != nil {
 		return h, fmt.Errorf("no healthy bridge at %s: %w", base, err)
 	}
 	if h.Version == "" || h.Status == "" {
@@ -573,12 +579,12 @@ func runLaunch(kind string, args []string, stdout, stderr io.Writer) int {
 				return 1
 			}
 		}
-	case o.dryRun:
-		base = "http://127.0.0.1:<port>"
 	case runningBridge(&base, &key):
 		// Like `omniroute launch`: share the bridge `mlai-wrap serve` keeps
 		// running, with its one keeper, instead of starting another.
 		fmt.Fprintf(stderr, "mlai-bridge %s: using the bridge at %s\n", kind, base)
+	case o.dryRun:
+		base = "http://127.0.0.1:<port>"
 	default:
 		var stop func()
 		if base, key, stop, err = startWrapServer(); err != nil {

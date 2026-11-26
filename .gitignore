@@ -12,3 +12,4 @@ workspace/
 *.env
 *.exe
 release/
+*.exe~
