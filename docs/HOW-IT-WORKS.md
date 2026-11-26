@@ -92,6 +92,10 @@ call. The Infinite plan covers Pixis and Forge without a meter; other models spe
   deltas.
 - The CLI accepts at most 30,000 characters per task. Agent requests from Claude Code and Codex
   are larger, so those clients need direct mode.
+- `max_tokens` (and `max_output_tokens` on `/v1/responses`) is not enforced: `mlai` has no
+  option to cap the answer, so a fallback answer can be longer and use more of your plan than the
+  cap allows. Requests with a cap are not refused, because Claude Code sends one with every
+  request. Direct mode passes the cap to the gateway; use direct-only where it matters.
 
 ## Tool calls
 

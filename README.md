@@ -141,6 +141,9 @@ go test ./...
 - The CLI fallback accepts at most 30,000 characters, so the agents need direct mode.
 - Server-side tools such as web search are unavailable.
 - A small `max_tokens` can return an empty reply, because reasoning uses the tokens first.
+- On the CLI fallback, `max_tokens` is not enforced: `mlai` has no option to cap output. Direct
+  mode passes it to the gateway. Where the cap matters, use `-direct-only` or the header
+  `X-MLAI-Direct-Only: true`.
 
 ## License
 
