@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // ---------- shared types ----------
@@ -222,10 +223,16 @@ func (s *server) execute(ctx context.Context, model, system string, msgs []chatM
 		if raw, ok := s.cache.Get(key); ok {
 			var ca cachedAnswer
 			if json.Unmarshal(raw, &ca) == nil {
+				traceFrom(ctx).setPath("cache")
 				return execResult{answer: ca, cacheHit: true}
 			}
 		}
 	}
+	if tr := traceFrom(ctx); tr.isDirectOnly() {
+		tr.setPath("refused")
+		return execResult{err: s.directOnlyError(tr)}
+	}
+	traceFrom(ctx).setPath("cli")
 
 	release, aerr := s.acquire(ctx, s.sem)
 	if aerr != nil {
@@ -300,14 +307,23 @@ func (s *server) serveDirect(parent context.Context, body []byte, stream bool, s
 	ctx, cancel := context.WithTimeout(parent, cfg.Timeout)
 	defer cancel()
 
+	tr := traceFrom(parent)
 	resp, err := s.directRequest(ctx, body, stream)
 	if err != nil {
-		logger.Printf("direct path failed (%v) — falling back to CLI", err)
+		if tr.isDirectOnly() {
+			logger.Printf("direct path failed (%v) — direct-only, no CLI fallback", err)
+		} else {
+			logger.Printf("direct path failed (%v) — falling back to CLI", err)
+		}
+		tr.noteFallback(err.Error())
 		return false, nil
 	}
 	done := serve(resp)
 	if done {
 		requestsTotal.Add(1)
+		tr.setPath("direct")
+	} else {
+		tr.noteFallback("the gateway answer could not be read")
 	}
 	return done, nil
 }
@@ -365,6 +381,8 @@ func (s *server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, e, reqID)
 		return
 	}
+	ctx, cancel := context.WithTimeout(r.Context(), cfg.Timeout)
+	defer cancel()
 	if len(req.Messages) == 0 {
 		e := errBadRequest
 		e.Message = "messages is required"
@@ -392,7 +410,7 @@ func (s *server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	// Fast path: talk to the gateway directly — real token streaming, no CLI overhead.
 	if s.direct {
 		body := openAIBodyFromOpenAI(req, model)
-		done, derr := s.serveDirect(r.Context(), body, req.Stream, func(resp *http.Response) bool {
+		done, derr := s.serveDirect(ctx, body, req.Stream, func(resp *http.Response) bool {
 			if req.Stream {
 				copySSE(w, resp)
 				return true
@@ -443,7 +461,7 @@ func (s *server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	res := s.execute(r.Context(), model, system, convo, req.Tools, cfg.Effort, req.MaxTokens)
+	res := s.execute(ctx, model, system, convo, req.Tools, cfg.Effort, req.MaxTokens)
 	if res.err != nil {
 		writeOpenAIError(w, *res.err, reqID)
 		return
@@ -455,8 +473,8 @@ func (s *server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("X-Cache", cacheFlag(res.cacheHit))
+		renewWriteDeadline(w)
 		w.WriteHeader(200)
-		flusher, _ := w.(http.Flusher)
 		chunk := func(delta map[string]any, finish any) {
 			payload := map[string]any{
 				"id": id, "object": "chat.completion.chunk", "created": answer.Created,
@@ -465,9 +483,7 @@ func (s *server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 			}
 			b, _ := json.Marshal(payload)
 			fmt.Fprintf(w, "data: %s\n\n", b)
-			if flusher != nil {
-				flusher.Flush()
-			}
+			streamFlush(w)
 		}
 		chunk(map[string]any{"role": "assistant"}, nil)
 		if len(answer.Tools) > 0 {
@@ -483,6 +499,7 @@ func (s *server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		} else {
 			for _, piece := range splitText(answer.Text, 48) {
 				chunk(map[string]any{"content": piece}, nil)
+				noteText(w)
 			}
 		}
 		chunk(map[string]any{}, "stop")
@@ -503,14 +520,10 @@ func (s *server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 			}
 			b, _ := json.Marshal(payload)
 			fmt.Fprintf(w, "data: %s\n\n", b)
-			if flusher != nil {
-				flusher.Flush()
-			}
+			streamFlush(w)
 		}
 		fmt.Fprint(w, "data: [DONE]\n\n")
-		if flusher != nil {
-			flusher.Flush()
-		}
+		streamFlush(w)
 		return
 	}
 
@@ -571,6 +584,8 @@ func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		writeAnthropicError(w, e, reqID)
 		return
 	}
+	ctx, cancel := context.WithTimeout(r.Context(), cfg.Timeout)
+	defer cancel()
 	if len(req.Messages) == 0 {
 		e := errBadRequest
 		e.Message = "messages is required"
@@ -607,7 +622,7 @@ func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	// Fast path: gateway direct (real streaming), CLI as fallback.
 	if s.direct {
 		body := openAIBodyFromAnthropic(req, model)
-		done, derr := s.serveDirect(r.Context(), body, req.Stream, func(resp *http.Response) bool {
+		done, derr := s.serveDirect(ctx, body, req.Stream, func(resp *http.Response) bool {
 			if req.Stream {
 				streamToAnthropic(w, resp, model)
 			} else {
@@ -624,7 +639,7 @@ func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	res := s.execute(r.Context(), model, system, req.Messages, req.Tools, cfg.Effort, req.MaxTokens)
+	res := s.execute(ctx, model, system, req.Messages, req.Tools, cfg.Effort, req.MaxTokens)
 	if res.err != nil {
 		writeAnthropicError(w, *res.err, reqID)
 		return
@@ -641,14 +656,12 @@ func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("X-Cache", cacheFlag(res.cacheHit))
+		renewWriteDeadline(w)
 		w.WriteHeader(200)
-		flusher, _ := w.(http.Flusher)
 		send := func(event string, data any) {
 			b, _ := json.Marshal(data)
 			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
-			if flusher != nil {
-				flusher.Flush()
-			}
+			streamFlush(w)
 		}
 		send("message_start", map[string]any{
 			"type": "message_start",
@@ -680,6 +693,7 @@ func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 					"type": "content_block_delta", "index": 0,
 					"delta": map[string]any{"type": "text_delta", "text": piece},
 				})
+				noteText(w)
 			}
 			send("content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
 		}
@@ -758,10 +772,20 @@ func splitText(s string, n int) []string {
 	if s == "" {
 		return nil
 	}
+	if n < 1 {
+		n = 1
+	}
 	var out []string
 	for len(s) > n {
-		out = append(out, s[:n])
-		s = s[n:]
+		cut := n
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		if cut == 0 { // one rune is longer than n: emit it whole
+			_, cut = utf8.DecodeRuneInString(s)
+		}
+		out = append(out, s[:cut])
+		s = s[cut:]
 	}
 	if s != "" {
 		out = append(out, s)

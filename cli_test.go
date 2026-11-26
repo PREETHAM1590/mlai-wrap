@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -83,7 +84,105 @@ func cliSandbox(t *testing.T) string {
 	for _, k := range []string{"MLAI_BRIDGE_URL", "MLAI_MODEL", "MLAI_API_KEY", "MLAI_BIND", "MLAI_WORKDIR", "WRAP_STUB", "WRAP_STUB_OUT", "WRAP_STUB_EXIT", "WRAP_STUB_SIGNAL"} {
 		t.Setenv(k, "")
 	}
+	// Never pick up a real bridge running on this machine.
+	old := discoveryFile
+	discoveryFile = filepath.Join(t.TempDir(), "none", "serve.json")
+	t.Cleanup(func() { discoveryFile = old })
 	return home
+}
+
+func TestLaunchUsesARunningBridge(t *testing.T) {
+	cliSandbox(t)
+	secret := testSecret(t)
+	bridge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/healthz":
+			fmt.Fprintf(w, `{"status":"ok","version":"test","proof":%q}`, testProof(secret, r.URL.Query().Get("challenge")))
+		case "/v1/models":
+			if r.Header.Get("Authorization") != "Bearer "+cliKey {
+				w.WriteHeader(401)
+				return
+			}
+			fmt.Fprint(w, `{"data":[]}`)
+		}
+	}))
+	defer bridge.Close()
+
+	var base, key string
+	if runningBridge(&base, &key) {
+		t.Error("without a discovery file no bridge may be used")
+	}
+	writeTestDiscovery(t, bridge.URL, secret)
+	if runningBridge(&base, &key) {
+		t.Error("a bridge that rejects the (missing) key must not be used")
+	}
+	t.Setenv("MLAI_API_KEY", cliKey)
+	if !runningBridge(&base, &key) || base != bridge.URL || key != cliKey {
+		t.Errorf("running bridge not used: %q %q", base, key)
+	}
+
+	// The file holds a different secret than the bridge proves with.
+	writeTestDiscovery(t, bridge.URL, testSecret(t))
+	base, key = "", ""
+	if runningBridge(&base, &key) || base != "" || key != "" {
+		t.Error("a proof made with another secret must be refused")
+	}
+
+	// A stale file: nothing listens there any more.
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closedURL := closed.URL
+	closed.Close()
+	writeTestDiscovery(t, closedURL, secret)
+	if runningBridge(&base, &key) {
+		t.Error("no bridge is listening there")
+	}
+
+	// A file that points beyond loopback is never followed.
+	writeTestDiscovery(t, "http://192.0.2.1:8197", secret)
+	if runningBridge(&base, &key) {
+		t.Error("a non-loopback discovery URL must be refused")
+	}
+}
+
+func TestLaunchNeverSendsTheKeyToAnImpostor(t *testing.T) {
+	cliSandbox(t)
+	t.Setenv("MLAI_API_KEY", cliKey)
+	secret := testSecret(t)
+	var sawAuth atomic.Bool
+	for name, health := range map[string]func(w http.ResponseWriter, r *http.Request){
+		"wrong proof": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, `{"status":"ok","version":"test","proof":%q}`, testProof("not-the-secret", r.URL.Query().Get("challenge")))
+		},
+		"no proof": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"status":"ok","version":"test"}`)
+		},
+		"proof that is not hex": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"status":"ok","version":"test","proof":"zz"}`)
+		},
+		"replayed proof": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, `{"status":"ok","version":"test","proof":%q}`, testProof(secret, strings.Repeat("0", 64)))
+		},
+	} {
+		impostor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != "" || r.Header.Get("x-api-key") != "" {
+				sawAuth.Store(true)
+			}
+			if r.URL.Path == "/healthz" {
+				health(w, r)
+				return
+			}
+			fmt.Fprint(w, `{"data":[]}`)
+		}))
+		writeTestDiscovery(t, impostor.URL, secret)
+		var base, key string
+		if runningBridge(&base, &key) || base != "" || key != "" {
+			t.Errorf("%s: the impostor was used", name)
+		}
+		impostor.Close()
+	}
+	if sawAuth.Load() {
+		t.Error("an impostor received an Authorization header")
+	}
 }
 
 func setLookPath(t *testing.T, f func(string) (string, error)) {
@@ -208,7 +307,7 @@ func TestRunCLIBasics(t *testing.T) {
 	}
 	for _, a := range []string{"version", "--version"} {
 		out.Reset()
-		if code := runCLI([]string{a}, &out, &errb); code != 0 || strings.TrimSpace(out.String()) != "mlai-bridge "+version {
+		if code := runCLI([]string{a}, &out, &errb); code != 0 || !strings.HasPrefix(out.String(), "mlai-wrap "+packageVersion+" (mlai-bridge "+version) {
 			t.Errorf("%s: code %d, stdout %q", a, code, out.String())
 		}
 	}
@@ -263,8 +362,24 @@ func TestPlanClaudeEnvironment(t *testing.T) {
 	}
 	expect("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "1")
 	expect("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
-	if len(plan.Args) != 0 {
-		t.Errorf("claude gets no extra arguments, got %v", plan.Args)
+	// The same values also go in --settings, which outranks ~/.claude/settings.json.
+	if len(plan.Args) != 2 || plan.Args[0] != "--settings" {
+		t.Fatalf("claude args = %v, want --settings <json>", plan.Args)
+	}
+	if strings.Contains(plan.Args[1], cliKey) {
+		t.Error("the key must not be in argv")
+	}
+	var s struct {
+		Env map[string]string `json:"env"`
+	}
+	if err := json.Unmarshal([]byte(plan.Args[1]), &s); err != nil {
+		t.Fatal(err)
+	}
+	if s.Env["ANTHROPIC_BASE_URL"] != "http://127.0.0.1:5000" || s.Env["ANTHROPIC_MODEL"] != "m-1" {
+		t.Errorf("settings env = %v", s.Env)
+	}
+	if _, ok := s.Env["ANTHROPIC_AUTH_TOKEN"]; ok {
+		t.Error("the key variable must not be in --settings")
 	}
 }
 
@@ -459,8 +574,10 @@ func TestExitCodePropagationAndChildEnvironment(t *testing.T) {
 		}
 	}
 	d, env := readDump(t, dump)
-	if want := []string{"-m", "keep", "--dry-run", "a b"}; !slices.Equal(d.Args, want) {
-		t.Errorf("client args = %v, want %v", d.Args, want)
+	if want := []string{"-m", "keep", "--dry-run", "a b"}; len(d.Args) != 6 || d.Args[0] != "--settings" || !slices.Equal(d.Args[2:], want) {
+		t.Errorf("client args = %v, want --settings <json> then %v", d.Args, want)
+	} else if !strings.Contains(d.Args[1], `"ANTHROPIC_BASE_URL":"`+bridge.URL+`"`) || strings.Contains(d.Args[1], cliKey) {
+		t.Errorf("--settings = %s", d.Args[1])
 	}
 	if env["ANTHROPIC_AUTH_TOKEN"] != cliKey || env["ANTHROPIC_BASE_URL"] != bridge.URL || env["ANTHROPIC_MODEL"] != "pixis-opus" {
 		t.Errorf("claude env: token %q, base %q, model %q", env["ANTHROPIC_AUTH_TOKEN"], env["ANTHROPIC_BASE_URL"], env["ANTHROPIC_MODEL"])
@@ -538,8 +655,10 @@ func TestPrivateBridgeForTheClient(t *testing.T) {
 		t.Fatalf("exit code = %d, want 5 (stderr %q)", code, errs)
 	}
 	d, env := readDump(t, dump)
-	if !slices.Equal(d.Args, []string{"hello"}) {
-		t.Errorf("client args = %v", d.Args)
+	if len(d.Args) != 3 || d.Args[0] != "--settings" || d.Args[2] != "hello" {
+		t.Errorf("client args = %v, want --settings <json> hello", d.Args)
+	} else if strings.Contains(d.Args[1], env["ANTHROPIC_AUTH_TOKEN"]) {
+		t.Error("the private key must not be in argv")
 	}
 	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(env["ANTHROPIC_AUTH_TOKEN"]) || env["ANTHROPIC_AUTH_TOKEN"] == cliKey {
 		t.Errorf("token %q is not a fresh 32-byte hex key", env["ANTHROPIC_AUTH_TOKEN"])
@@ -735,5 +854,37 @@ func TestDoctorReportsYesNoOnly(t *testing.T) {
 	noClient(t)
 	if code := runDoctor(&out); code != 1 || !regexp.MustCompile(`mlai in PATH:\s+no`).MatchString(out.String()) {
 		t.Errorf("without mlai: code %d\n%s", code, out.String())
+	}
+}
+
+func TestSettingsGoToAFileForBatchShims(t *testing.T) {
+	plan := planLaunch("claude", "http://127.0.0.1:5000", cliKey, "m-1")
+	args, cleanup, err := settingsForShim(`C:\tools\claude.cmd`, plan.Args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(args) != 2 || args[0] != "--settings" || strings.ContainsAny(args[1], cmdUnsafe) {
+		t.Fatalf("args = %v, want --settings <plain path>", args)
+	}
+	raw, err := os.ReadFile(args[1])
+	if err != nil || string(raw) != plan.Args[1] {
+		t.Fatalf("settings file holds %q (%v), want the JSON", raw, err)
+	}
+	if strings.Contains(string(raw), cliKey) {
+		t.Error("the key must not be written to the settings file")
+	}
+	cleanup()
+	if _, err := os.Stat(args[1]); !os.IsNotExist(err) {
+		t.Error("cleanup left the settings file behind")
+	}
+	// A real executable keeps the inline JSON.
+	same, cleanup2, err := settingsForShim(`C:\tools\claude.exe`, plan.Args)
+	cleanup2()
+	if err != nil || !slices.Equal(same, plan.Args) {
+		t.Errorf("exe args = %v, %v", same, err)
+	}
+	// The whole launch path accepts a .cmd shim with no other arguments.
+	if _, cargs, err := prepareClient(`C:\tools\claude.cmd`, args); err != nil {
+		t.Errorf("prepareClient refused the shim: %v (%v)", err, cargs)
 	}
 }

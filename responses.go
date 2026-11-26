@@ -5,6 +5,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -260,11 +261,10 @@ func responsesToolChoice(raw json.RawMessage) any {
 // respEmitter builds the Responses output once and either streams it as SSE or,
 // for non-stream requests, writes the final response as one JSON document.
 type respEmitter struct {
-	w       http.ResponseWriter
-	flusher http.Flusher
-	reqID   string
-	stream  bool
-	refs    map[string]respToolRef
+	w      http.ResponseWriter
+	reqID  string
+	stream bool
+	refs   map[string]respToolRef
 
 	id      string
 	model   string
@@ -294,9 +294,7 @@ func (e *respEmitter) send(typ string, data map[string]any) {
 	}
 	b, _ := json.Marshal(data)
 	fmt.Fprintf(e.w, "event: %s\ndata: %s\n\n", typ, b)
-	if e.flusher != nil {
-		e.flusher.Flush()
-	}
+	streamFlush(e.w)
 }
 
 func (e *respEmitter) response(status string) map[string]any {
@@ -315,6 +313,7 @@ func (e *respEmitter) begin() {
 	if e.stream {
 		e.w.Header().Set("Content-Type", "text/event-stream")
 		e.w.Header().Set("Cache-Control", "no-cache")
+		renewWriteDeadline(e.w)
 		e.w.WriteHeader(200)
 	}
 	e.send("response.created", map[string]any{"response": e.response("in_progress")})
@@ -341,6 +340,7 @@ func (e *respEmitter) writeText(delta string) {
 	e.openText()
 	e.text.WriteString(delta)
 	e.send("response.output_text.delta", map[string]any{"item_id": e.msgID, "output_index": e.textIdx, "content_index": 0, "delta": delta, "logprobs": []any{}})
+	noteText(e.w)
 }
 
 func (e *respEmitter) closeText() {
@@ -582,6 +582,8 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, e, reqID)
 		return
 	}
+	ctx, cancel := context.WithTimeout(r.Context(), cfg.Timeout)
+	defer cancel()
 	if req.PreviousResponseID != "" {
 		e := errBadRequest
 		e.Message = "previous_response_id is not supported: this bridge is stateless, send the full input"
@@ -611,9 +613,8 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	if req.Reasoning != nil && req.Reasoning.Effort != "" {
 		effort = req.Reasoning.Effort
 	}
-	flusher, _ := w.(http.Flusher)
 	em := &respEmitter{
-		w: w, flusher: flusher, reqID: reqID, stream: req.Stream, refs: refs,
+		w: w, reqID: reqID, stream: req.Stream, refs: refs,
 		id: fmt.Sprintf("resp_%d", time.Now().UnixNano()), model: model, created: time.Now().Unix(),
 	}
 
@@ -645,7 +646,7 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 			body["max_tokens"] = req.MaxOutputTokens
 		}
 		raw, _ := json.Marshal(body)
-		done, derr := s.serveDirect(r.Context(), raw, true, func(resp *http.Response) bool {
+		done, derr := s.serveDirect(ctx, raw, true, func(resp *http.Response) bool {
 			em.fromGateway(resp)
 			return true
 		})
@@ -670,7 +671,7 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		}
 		convo = append(convo, m)
 	}
-	res := s.execute(r.Context(), model, system, convo, defs, effort, req.MaxOutputTokens)
+	res := s.execute(ctx, model, system, convo, defs, effort, req.MaxOutputTokens)
 	if res.err != nil {
 		writeOpenAIError(w, *res.err, reqID)
 		return

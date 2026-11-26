@@ -64,9 +64,12 @@ func runStub(args []string) int {
 		return 0
 	}
 	switch {
+	case args[0] == "--version":
+		fmt.Println("0.0.0-stub")
 	case args[0] == "whoami":
 		fmt.Println("Signed in as stub@example.test")
-	case args[0] == "--bg":
+	case args[0] == "-y": // the keeper: mlai -y -p …, task on stdin
+		io.ReadAll(os.Stdin)
 		return stubBackground()
 	case slices.Contains(args, "-p"):
 		return stubPrompt()
@@ -79,16 +82,30 @@ func stubResult(text string) {
 	fmt.Println(string(b))
 }
 
-// stubBackground mimics `mlai --bg`: it records a session whose token the
+// stubBackground mimics the keeper run (formerly `mlai --bg`): it records a session whose token the
 // keeper can pick up.
 func stubBackground() int {
 	if os.Getenv("STUB_BG") == "fail" {
 		fmt.Fprintln(os.Stderr, "stub: cannot start a background run")
 		return 1
 	}
+	if os.Getenv("STUB_BG") == "ended" { // mlai 0.3.27: the run starts, errors and never writes a token
+		cwd, _ := os.Getwd()
+		id := fmt.Sprintf("ended-%d-%d", os.Getpid(), time.Now().UnixNano())
+		dir := filepath.Join(os.Getenv("STUB_HOME"), ".mlai", "sessions", id)
+		os.MkdirAll(dir, 0o700)
+		session, _ := json.Marshal(map[string]string{"root": cwd})
+		os.WriteFile(filepath.Join(dir, "session.json"), session, 0o600)
+		os.WriteFile(filepath.Join(dir, "bg.json"), []byte(`{"state":"error","exitCode":1}`), 0o600)
+		fmt.Println(id)
+		return 0
+	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		return 1
+	}
+	if os.Getenv("STUB_BG") == "slow" { // a keeper that is still warming up
+		time.Sleep(30 * time.Second)
 	}
 	id := fmt.Sprintf("stub-%d-%d", os.Getpid(), time.Now().UnixNano())
 	dir := filepath.Join(os.Getenv("STUB_HOME"), ".mlai", "sessions", id)
@@ -124,6 +141,12 @@ func stubPrompt() int {
 		time.Sleep(30 * time.Second)
 	case "text":
 		stubResult(os.Getenv("STUB_TEXT"))
+	case "hookanswer": // mlai 0.3.x: the reply is a narration, the answer a hook failure
+		hook := "Stop hook\n\nA Stop hook failed to execute: spawn EPERM. Hooks always run on this local machine."
+		fmt.Println(`{"type":"narration","content":"REAL_REPLY"}`)
+		b, _ := json.Marshal(map[string]string{"type": "answer", "content": hook})
+		fmt.Println(string(b))
+		stubResult(hook)
 	default:
 		stubResult("stub:" + string(in))
 	}
@@ -291,6 +314,7 @@ func testMux(s *server) *http.ServeMux {
 	mux.HandleFunc("/v1/chat/completions", s.handleOpenAIChat)
 	mux.HandleFunc("/v1/messages", s.handleAnthropicMessages)
 	mux.HandleFunc("/v1/messages/count_tokens", s.handleCountTokens)
+	mux.HandleFunc("/v1/status", s.handleStatus)
 	return mux
 }
 
@@ -420,8 +444,15 @@ func TestValidateConfig(t *testing.T) {
 		} else if !strings.Contains(err.Error(), "MLAI_API_KEY") {
 			t.Errorf("bind %q: error should name the fix: %v", bind, err)
 		}
-		if err := validateConfig(config{Bind: bind, APIKey: testKey}); err != nil {
-			t.Errorf("bind %q with key: %v", bind, err)
+		// A key alone is not enough: it would travel over plain HTTP.
+		if err := validateConfig(config{Bind: bind, APIKey: testKey}); err == nil || !strings.Contains(err.Error(), "MLAI_ALLOW_PLAIN_HTTP") {
+			t.Errorf("bind %q with key but no plain-HTTP opt-in: %v, want a refusal", bind, err)
+		}
+		if err := validateConfig(config{Bind: bind, APIKey: testKey, AllowPlainHTTP: true}); err != nil {
+			t.Errorf("bind %q with key and opt-in: %v", bind, err)
+		}
+		if err := validateConfig(config{Bind: bind, AllowPlainHTTP: true}); err == nil {
+			t.Errorf("bind %q with opt-in but no key must be refused", bind)
 		}
 	}
 }
@@ -905,8 +936,8 @@ func TestKeeperStartsOneRunForCancelledCallers(t *testing.T) {
 		tok, _, busy := keeperState(k)
 		return !busy && tok != ""
 	})
-	if n := env.count(t, "--bg"); n != 1 {
-		t.Errorf("--bg ran %d times for %d callers, want 1", n, callers)
+	if n := env.count(t, "-y"); n != 1 {
+		t.Errorf("keeper ran %d times for %d callers, want 1", n, callers)
 	}
 	tok, fails, _ := keeperState(k)
 	if !strings.HasPrefix(tok, "mlrun_") || fails != 0 {
@@ -919,8 +950,8 @@ func TestKeeperStartsOneRunForCancelledCallers(t *testing.T) {
 	if _, err := k.Refresh(ctx, tok); err == nil || !strings.Contains(err.Error(), "cooling down") {
 		t.Errorf("second refresh: err = %v, want a cooldown error", err)
 	}
-	if n := env.count(t, "--bg"); n != 1 {
-		t.Errorf("--bg ran %d times after the cooldown refusal, want 1", n)
+	if n := env.count(t, "-y"); n != 1 {
+		t.Errorf("keeper ran %d times after the cooldown refusal, want 1", n)
 	}
 }
 
@@ -1081,8 +1112,8 @@ func TestKeeperSuccessResetsBackoff(t *testing.T) {
 	if _, fails, _ := keeperState(k); fails != 0 {
 		t.Errorf("fails = %d after a successful spawn, want 0", fails)
 	}
-	if n := env.count(t, "--bg"); n != 1 {
-		t.Errorf("--bg ran %d times, want 1", n)
+	if n := env.count(t, "-y"); n != 1 {
+		t.Errorf("keeper ran %d times, want 1", n)
 	}
 }
 
@@ -1197,8 +1228,8 @@ func TestDirectRefreshesOnceOn401(t *testing.T) {
 	if len(tokens) != 2 || tokens[0] == tokens[1] {
 		t.Errorf("gateway calls = %d, want 2 with different tokens", len(tokens))
 	}
-	if n := env.count(t, "--bg"); n != 1 {
-		t.Errorf("--bg ran %d times, want 1", n)
+	if n := env.count(t, "-y"); n != 1 {
+		t.Errorf("keeper ran %d times, want 1", n)
 	}
 }
 

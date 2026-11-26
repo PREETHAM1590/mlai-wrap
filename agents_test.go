@@ -4,11 +4,16 @@ package main
 // /v1/messages and /v1/responses, direct mode).
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const toolStream = `data: {"choices":[{"delta":{"content":"hi "}}]}
@@ -194,5 +199,64 @@ func TestCLIErrorFormats(t *testing.T) {
 		if got := cliError(json.RawMessage(raw)); got != want {
 			t.Errorf("cliError(%s) = %q, want %q", raw, got, want)
 		}
+	}
+}
+
+// A keeper run that ends without a token (mlai 0.3.27's crash, a sign-in,
+// quota or network problem) is retried after the cooldown, never switched off
+// for good; a marker left by an older build is removed.
+func TestKeeperRetriesWhenTheRunGivesNoToken(t *testing.T) {
+	env := setupStub(t)
+	t.Setenv("STUB_BG", "ended")
+	legacy := filepath.Join(cfg.WorkDir, ".keeper", unsupportedFile)
+	if err := os.MkdirAll(filepath.Dir(legacy), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy, []byte("0.0.0-stub\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	k := newRunKeeper(cfg.MLAI, cfg.WorkDir)
+	t.Cleanup(func() { waitKeeperIdle(t, k) })
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Errorf("the old unsupported marker is still there (%v)", err)
+	}
+
+	t0 := time.Now()
+	if _, err := k.Refresh(context.Background(), ""); err == nil || !errors.Is(err, errNoRunToken) {
+		t.Fatalf("err = %v, want errNoRunToken", err)
+	}
+	if d := time.Since(t0); d > 20*time.Second {
+		t.Errorf("took %s; the ended run should be noticed without waiting 90s", d)
+	}
+	// Inside the cooldown: refused without a new run.
+	if _, err := k.Refresh(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "cooling down") {
+		t.Errorf("second refresh: %v, want a cooldown refusal", err)
+	}
+	if n := env.count(t, "-y"); n != 1 {
+		t.Errorf("keeper ran %d times during the cooldown, want 1", n)
+	}
+	// After the cooldown, once the problem is gone, direct mode works again.
+	t.Setenv("STUB_BG", "")
+	k.mu.Lock()
+	k.lastSpawn = time.Time{}
+	k.mu.Unlock()
+	if tok, err := k.Refresh(context.Background(), ""); err != nil || !strings.HasPrefix(tok, "mlrun_") {
+		t.Errorf("after the cooldown: %q, %v", tok, err)
+	}
+	if n := env.count(t, "-y"); n != 2 {
+		t.Errorf("keeper ran %d times, want 2", n)
+	}
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Error("a failed keeper run must not write a marker")
+	}
+}
+
+func TestHookFailureIsNotTheAnswer(t *testing.T) {
+	setupStub(t)
+	t.Setenv("STUB_MODE", "hookanswer")
+	r := &Runner{Bin: cfg.MLAI, WorkDir: cfg.WorkDir}
+	res := r.Run(context.Background(), "hello", "m", "")
+	if res.Err != nil || res.Text != "REAL_REPLY" {
+		t.Errorf("got %q, %v; want the narration", res.Text, res.Err)
 	}
 }

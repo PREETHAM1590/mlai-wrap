@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -73,6 +75,11 @@ func cliError(raw json.RawMessage) string {
 	return o.Code + ": " + o.Message
 }
 
+// hookFailure matches the message mlai prints when one of its own engine hooks
+// could not run, e.g. "Stop hook", a blank line, then
+// "A Stop hook failed to execute: spawn EPERM".
+var hookFailure = regexp.MustCompile(`^\s*\w+ hook\s+A \w+ hook failed to execute`)
+
 // cappedBuffer is a goroutine-safe writer that keeps the first max bytes and
 // discards the rest.
 type cappedBuffer struct {
@@ -124,6 +131,9 @@ func (r *Runner) Run(ctx context.Context, prompt, model, effort string) RunResul
 	cmd := exec.CommandContext(ctx, r.Bin, args...)
 	cmd.Dir = r.WorkDir
 	cmd.Env = append(childEnv(), "TERM=dumb")
+	if runtime.GOOS == "windows" { // the Windows engine reads its request as cp1252
+		prompt = cp1252Safe(prompt)
+	}
 	cmd.Stdin = strings.NewReader(prompt)
 	setProcGroup(cmd)
 	cmd.Cancel = func() error { return killTree(cmd) }
@@ -144,6 +154,7 @@ func (r *Runner) Run(ctx context.Context, prompt, model, effort string) RunResul
 	}()
 
 	var res RunResult
+	var narration string // the model's own last message
 	sc := bufio.NewScanner(pr)
 	sc.Buffer(make([]byte, 1<<20), 4<<20)
 	for sc.Scan() {
@@ -162,6 +173,10 @@ func (r *Runner) Run(ctx context.Context, prompt, model, effort string) RunResul
 			}
 		}
 		switch ev.Type {
+		case "narration":
+			if ev.Content != "" {
+				narration = ev.Content
+			}
 		case "answer":
 			if ev.Content != "" {
 				res.Text = ev.Content
@@ -200,6 +215,11 @@ func (r *Runner) Run(ctx context.Context, prompt, model, effort string) RunResul
 	waitErr := <-waitCh
 	if errors.Is(waitErr, exec.ErrWaitDelay) {
 		waitErr = nil // the process exited; only an inherited pipe held on
+	}
+	// mlai 0.3.x reports a failed engine hook ("Stop hook … spawn EPERM") as the
+	// answer; the model's reply is then only in the last narration event.
+	if narration != "" && hookFailure.MatchString(res.Text) {
+		res.Text = narration
 	}
 
 	var errLines []string

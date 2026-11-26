@@ -83,8 +83,8 @@ func copySSE(w http.ResponseWriter, resp *http.Response) {
 	defer resp.Body.Close()
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
+	renewWriteDeadline(w)
 	w.WriteHeader(200)
-	flusher, _ := w.(http.Flusher)
 	buf := make([]byte, 8192)
 	for {
 		n, err := resp.Body.Read(buf)
@@ -92,8 +92,9 @@ func copySSE(w http.ResponseWriter, resp *http.Response) {
 			if _, werr := w.Write(buf[:n]); werr != nil {
 				return
 			}
-			if flusher != nil {
-				flusher.Flush()
+			streamFlush(w)
+			if visibleContent.Match(buf[:n]) {
+				noteText(w)
 			}
 		}
 		if err != nil {
@@ -129,14 +130,12 @@ func streamToAnthropic(w http.ResponseWriter, resp *http.Response, model string)
 	defer resp.Body.Close()
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
+	renewWriteDeadline(w)
 	w.WriteHeader(200)
-	flusher, _ := w.(http.Flusher)
 	send := func(event string, data any) {
 		b, _ := json.Marshal(data)
 		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
-		if flusher != nil {
-			flusher.Flush()
-		}
+		streamFlush(w)
 	}
 	id := fmt.Sprintf("msg_%d", time.Now().UnixNano())
 	started := false
@@ -186,6 +185,7 @@ func streamToAnthropic(w http.ResponseWriter, resp *http.Response, model string)
 			textIdx = openBlock(map[string]any{"type": "text", "text": ""})
 		}
 		delta(textIdx, map[string]any{"type": "text_delta", "text": s})
+		noteText(w)
 	}
 	closeText := func() {
 		if textIdx >= 0 {

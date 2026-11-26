@@ -10,6 +10,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,8 +36,10 @@ const (
 const tokenTTL = 80 * time.Minute
 
 // keeperCooldown is the minimum time between two keeper spawns, success or not. It
-// doubles with every failure in a row (up to 32x).
-var keeperCooldown = 60 * time.Second
+// doubles with every failure in a row (up to 32x). It is short because mlai
+// 0.3.x ends a keeper run (and its token) after about 40 s, and a keeper start
+// opens no windows now that it is a foreground `mlai -p`.
+var keeperCooldown = 10 * time.Second
 
 // closeWait bounds how long Close waits for a keeper run that is being opened.
 var closeWait = 15 * time.Second
@@ -60,21 +64,88 @@ type runKeeper struct {
 	fails     int
 	refresh   chan struct{}
 	closed    bool
+	// markerDir is the .keeper folder shared by every bridge on the same workdir;
+	// dir (the keeper's working directory) is private to this one.
+	markerDir string
+	// proc is the running keeper process and procDone is closed once it has been
+	// waited for. Both are set after Start and cleared by stopProc.
+	proc     *exec.Cmd
+	procDone chan struct{}
+	// lastStart is how long the last successful keeper start took to give a token.
+	lastStart time.Duration
 }
 
-func newRunKeeper(mlaiBin, workdir string) *runKeeper {
-	dir := filepath.Join(workdir, ".keeper")
-	if abs, err := filepath.Abs(dir); err == nil {
-		dir = abs
+// keeperStatus is the keeper's part of GET /v1/status.
+type keeperStatus struct {
+	TokenReady   bool    `json:"token_ready"`
+	TokenAgeS    int     `json:"token_age_s,omitempty"`
+	Starting     bool    `json:"starting"`
+	LastStartS   float64 `json:"last_start_s,omitempty"`
+	LastStartAgo int     `json:"last_start_ago_s,omitempty"`
+	FailsInARow  int     `json:"failures_in_a_row"`
+	LastError    string  `json:"last_error,omitempty"`
+}
+
+// State reports the keeper for /v1/status. No token is included.
+func (k *runKeeper) State() keeperStatus {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	st := keeperStatus{
+		TokenReady:  k.token != "" && time.Since(k.at) < tokenTTL,
+		Starting:    k.refresh != nil,
+		LastStartS:  k.lastStart.Seconds(),
+		FailsInARow: k.fails,
 	}
+	if st.TokenReady {
+		st.TokenAgeS = int(time.Since(k.at).Seconds())
+	}
+	if !k.lastSpawn.IsZero() {
+		st.LastStartAgo = int(time.Since(k.lastSpawn).Seconds())
+	}
+	if k.lastErr != nil {
+		st.LastError = k.lastErr.Error()
+	}
+	return st
+}
+
+// Prewarm starts a keeper run in the background so the first request finds a
+// token. It never blocks; a failure only leaves the usual backoff.
+func (k *runKeeper) Prewarm() {
+	go func() {
+		if _, err := k.Token(context.Background()); err != nil {
+			logger.Printf("keeper prewarm failed: %v", err)
+		}
+	}()
+}
+
+// errNoRunToken means the keeper's run ended without writing a run token.
+var errNoRunToken = errors.New("the keeper run ended without a run token")
+
+// unsupportedFile is the marker older builds wrote to turn direct mode off for
+// good after one keeper run without a token. A sign-in, quota or network
+// problem looks the same, so failures are no longer persisted: the keeper
+// retries with its backoff instead, and the old marker is removed.
+const unsupportedFile = "unsupported"
+
+func newRunKeeper(mlaiBin, workdir string) *runKeeper {
+	// Every bridge process gets its own keeper folder, so two bridges sharing a
+	// workspace never adopt or stop each other's runs. The marker stays in base.
+	base := filepath.Join(workdir, ".keeper")
+	if abs, err := filepath.Abs(base); err == nil {
+		base = abs
+	}
+	var rnd [4]byte
+	rand.Read(rnd[:])
+	dir := filepath.Join(base, fmt.Sprintf("%d-%s", os.Getpid(), hex.EncodeToString(rnd[:])))
 	os.MkdirAll(dir, 0o700)
-	return &runKeeper{dir: dir, mlai: mlaiBin}
+	os.Remove(filepath.Join(base, unsupportedFile))
+	return &runKeeper{dir: dir, markerDir: base, mlai: mlaiBin}
 }
 
 // sessionsDir is where the CLI writes per-run state (and the run token).
 func sessionsDir() string {
-	if h, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(h, ".mlai", "sessions")
+	if h := realMlaiHome(); h != "" {
+		return filepath.Join(h, "sessions")
 	}
 	return ""
 }
@@ -242,6 +313,7 @@ func (k *runKeeper) runRefresh(done chan struct{}) {
 		k.stop(prev)
 	}
 
+	t0 := time.Now()
 	tok, id, err := k.spawn()
 
 	k.mu.Lock()
@@ -249,11 +321,14 @@ func (k *runKeeper) runRefresh(done chan struct{}) {
 	switch {
 	case err != nil:
 		k.fails++
+		// Not persisted: the next refresh waits keeperCooldown << fails (up to 32x).
+		logger.Printf("keeper failed (%d in a row): %v", k.fails, err)
 	case k.closed:
 		orphan, err = id, errors.New("keeper closed")
 	default:
 		k.token, k.session, k.at = tok, id, time.Now()
 		k.fails = 0
+		k.lastStart = time.Since(t0)
 	}
 	k.lastErr = err
 	k.refresh = nil
@@ -271,28 +346,104 @@ func (k *runKeeper) spawn() (string, string, error) {
 			seen[e.Name()] = true
 		}
 	}
-	cmd := exec.Command(k.mlai, "--bg", "-y", keeperPrompt)
+	// A foreground `mlai -p` child, not `mlai --bg`: on Windows every --bg run
+	// opens a burst of console windows (Windows Terminal tabs). -y comes first so
+	// the keeper is easy to tell apart from prompt runs; the task is on stdin.
+	cmd := exec.Command(k.mlai, "-y", "-p", "--output-format", "stream-json", "--no-tui")
 	cmd.Dir = k.dir
 	cmd.Env = childEnv()
+	cmd.Stdin = strings.NewReader(keeperPrompt)
 	out := &cappedBuffer{max: 16 << 10}
 	cmd.Stdout = out
 	cmd.Stderr = out
+	setProcGroup(cmd)
 	cmd.WaitDelay = 5 * time.Second
 	if err := cmd.Start(); err != nil {
 		return "", "", fmt.Errorf("start keeper: %w", err)
 	}
-	go cmd.Wait() // reap; the run lives on the server
+	exited := make(chan struct{})
+	go func() { cmd.Wait(); close(exited) }()
+	k.mu.Lock()
+	k.proc, k.procDone = cmd, exited
+	k.mu.Unlock()
+	// fail ends the owned process if it still runs: no failed spawn leaves one behind.
+	fail := func(err error) (string, string, error) {
+		k.stopProc()
+		return "", "", err
+	}
 
 	deadline := time.Now().Add(90 * time.Second)
 	for time.Now().Before(deadline) {
+		k.mu.Lock()
+		closed := k.closed
+		k.mu.Unlock()
+		if closed {
+			return fail(errors.New("keeper closed"))
+		}
 		if tok, id, ok := tokenFromNewestSession(start, k.dir, seen); ok {
 			logger.Printf("run token refreshed (keeper pid %d, len %d)", cmd.Process.Pid, len(tok))
 			return tok, id, nil
 		}
+		ended := endedKeeperRun(k.dir, seen)
+		select {
+		case <-exited:
+			if ended == "" {
+				ended = "keeper process exited"
+			}
+		default:
+		}
+		if ended != "" {
+			// Look once more: the token may have been written just before the end.
+			if tok, tid, ok := tokenFromNewestSession(start, k.dir, seen); ok {
+				return tok, tid, nil
+			}
+			return fail(fmt.Errorf("%w (run %s)", errNoRunToken, ended))
+		}
 		time.Sleep(750 * time.Millisecond)
 	}
-	cmd.Process.Kill()
-	return "", "", fmt.Errorf("no run token appeared within 90s: %s", strings.TrimSpace(out.String()))
+	return fail(fmt.Errorf("no run token appeared within 90s: %s", strings.TrimSpace(out.String())))
+}
+
+// endedKeeperRun returns the id of a new session in dir whose background run
+// has finished (bg.json state other than running), or "".
+func endedKeeperRun(dir string, seen map[string]bool) string {
+	root := sessionsDir()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if seen[e.Name()] || !sessionRunsIn(filepath.Join(root, e.Name()), dir) {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(root, e.Name(), "bg.json"))
+		if err != nil {
+			continue
+		}
+		var bg struct {
+			State string `json:"state"`
+		}
+		if json.Unmarshal(raw, &bg) == nil && bg.State != "" && bg.State != "running" && bg.State != "starting" && bg.State != "queued" {
+			return e.Name()
+		}
+	}
+	return ""
+}
+
+// stopProc kills the keeper process this keeper owns, if it still runs.
+func (k *runKeeper) stopProc() {
+	k.mu.Lock()
+	proc, done := k.proc, k.procDone
+	k.proc, k.procDone = nil, nil
+	k.mu.Unlock()
+	if proc == nil {
+		return
+	}
+	select {
+	case <-done:
+	default:
+		killTree(proc)
+	}
 }
 
 // stop asks the CLI to end a keeper run. Best effort: errors are ignored.
@@ -300,12 +451,14 @@ func (k *runKeeper) stop(id string) {
 	if id == "" || strings.HasPrefix(id, "-") {
 		return
 	}
+	k.stopProc()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, k.mlai, "agents", "stop", id)
 	cmd.Dir = k.dir
 	cmd.Env = childEnv()
 	cmd.WaitDelay = 5 * time.Second
+	hideConsole(cmd)
 	cmd.Run()
 }
 
@@ -317,6 +470,7 @@ func (k *runKeeper) Close() {
 	k.session, k.token = "", ""
 	refresh := k.refresh
 	k.mu.Unlock()
+	k.stopProc() // a keeper that is still warming up has no session to stop yet
 	k.stop(id)
 	if refresh != nil { // a run is being opened: give it time to appear so it gets stopped
 		select {
@@ -324,12 +478,30 @@ func (k *runKeeper) Close() {
 		case <-time.After(closeWait):
 		}
 	}
+	os.RemoveAll(k.dir) // only this instance's folder, never the shared base
 }
 
 // directRequest posts an OpenAI-shaped body to the gateway with the run token.
 // The body of a >=400 answer is only logged.
 func (s *server) directRequest(ctx context.Context, body []byte, stream bool) (*http.Response, error) {
-	tok, err := s.keeper.Token(ctx)
+	tr := traceFrom(ctx)
+	// A request waits at most cfg.KeeperWait for a run token; the keeper run
+	// itself goes on, so the next request finds the token.
+	waitToken := func(get func(context.Context) (string, error)) (string, error) {
+		kctx, cancel := ctx, context.CancelFunc(func() {})
+		if cfg.KeeperWait > 0 {
+			kctx, cancel = context.WithTimeout(ctx, cfg.KeeperWait)
+		}
+		defer cancel()
+		t0 := time.Now()
+		tok, err := get(kctx)
+		tr.addKeeper(time.Since(t0))
+		if err != nil && kctx.Err() != nil && ctx.Err() == nil {
+			err = fmt.Errorf("no run token within %s (keeper still starting)", cfg.KeeperWait)
+		}
+		return tok, err
+	}
+	tok, err := waitToken(s.keeper.Token)
 	if err != nil {
 		return nil, err
 	}
@@ -353,7 +525,8 @@ func (s *server) directRequest(ctx context.Context, body []byte, stream bool) (*
 	if resp.StatusCode == 401 || resp.StatusCode == 409 {
 		// run ended or revoked — open a new one and retry once
 		resp.Body.Close()
-		tok, err = s.keeper.Refresh(ctx, tok)
+		stale := tok
+		tok, err = waitToken(func(c context.Context) (string, error) { return s.keeper.Refresh(c, stale) })
 		if err != nil {
 			return nil, err
 		}

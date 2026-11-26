@@ -13,6 +13,9 @@ func setProcGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
+// hideConsole is a no-op outside Windows.
+func hideConsole(cmd *exec.Cmd) {}
+
 // killTree kills the whole process group of cmd.
 func killTree(cmd *exec.Cmd) error {
 	if cmd.Process == nil {
