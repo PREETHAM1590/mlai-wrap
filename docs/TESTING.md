@@ -12,8 +12,20 @@ go test ./...
 go test -race ./...
 ```
 
-CI runs `gofmt -l .`, `go vet ./...` and `go test -race ./...` on Linux
-(`.github/workflows/ci.yml`).
+CI (`.github/workflows/ci.yml`) runs:
+
+- on Linux: `gofmt -l .`, `go vet ./...`, `govulncheck ./...` and `go test -race ./...`;
+- on Windows: `go vet ./...`, `go test ./...` and `scripts/windows-smoke.ps1`, which builds
+  `mlai-wrap.exe` and checks the executable itself: `version` shows the build identity, `serve`
+  starts and writes the discovery file, `status` and `status --json` find it, a direct-only
+  request is refused with `503` and no CLI run, and the stale discovery file of a killed bridge
+  is not trusted. No ML AI account is needed. A release waits for both jobs.
+
+Run the smoke test locally:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows-smoke.ps1
+```
 
 The tests need no network and no real `mlai`. The test binary doubles as a stub `mlai` when
 `MLAI_STUB=1` is set.
@@ -25,6 +37,9 @@ The tests need no network and no real `mlai`. The test binary doubles as a stub 
 | `agents_test.go` | Anthropic tool use, `/v1/responses`, cut streams, a keeper run that ends without a token, hook-failure answers, CLI error formats |
 | `cli_test.go` | launcher argument parsing, client environment and `--settings`, exit codes, private and running bridges, `.cmd` shims, `env`, `models`, `status`, `doctor` |
 | `isolate_test.go` | the `MLAI_HOME` link, the child environment, cp1252-safe prompts |
+| `discovery_test.go` | the discovery file and its `/healthz` proof, the plain-HTTP opt-in, the admission limit |
+| `review_test.go` | UTF-8-safe stream splitting, cache byte limits, one keeper folder per bridge, a warming keeper killed on shutdown, a client that stops reading |
+| `features_test.go` | `/v1/status` and `mlai-wrap status`, direct-only (flag and header), `-keeper-wait`, `-prewarm`, the build identity |
 
 ## Manual end-to-end check on Windows
 

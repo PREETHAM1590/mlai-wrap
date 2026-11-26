@@ -43,19 +43,34 @@ then check the command with:
 mlai-wrap claude --dry-run
 ```
 
-## Log says "direct mode is off"
+## Requests are slow, or fall back to the CLI
 
-**Problem.** The bridge log says direct mode is off, and requests use the slower CLI path.
+**Problem.** Some requests take much longer than others, or the log says
+`direct path failed (…) — falling back to CLI`.
 
-**Cause.** A keeper run ended without a token. The bridge recorded this for the current mlai
-version in `~/mlai-bridge/workspace/.keeper/unsupported`, and keeps direct mode off until
-`mlai --version` changes.
+**Cause.** Usually the run token: with mlai 0.3.27 a keeper run lasts about 40 s, and a request
+that arrives after it ended waits for a new one (about 15 to 25 s), up to `-keeper-wait`.
 
-**Fix.** Delete `~/mlai-bridge/workspace/.keeper/unsupported` to retry.
+**Fix.** Run `mlai-wrap status`. `keeper wait` shows the time spent on run tokens, `fallback`
+the last reason, and `keeper` the failures in a row with the last error. Start the bridge with
+`-prewarm` so the first request does not wait. A keeper that keeps failing is retried with a
+growing pause (up to about 5 minutes); check `mlai whoami`. If a client prefers a fast error
+over a slow CLI run, use `-direct-only` or the header `X-MLAI-Direct-Only: true`.
 
-```powershell
-Remove-Item "$HOME\mlai-bridge\workspace\.keeper\unsupported"
-```
+## "details: not available" in mlai-wrap status
+
+**Cause.** The bridge is older than 0.1.1 (no `/v1/status`), or it has a key and `MLAI_API_KEY`
+is not set in your shell.
+
+**Fix.** Restart the bridge with the current version, or set `MLAI_API_KEY`.
+
+## mlai-wrap claude starts a private bridge although serve is running
+
+**Cause.** The `serve` bridge could not be verified: it is older than 0.1.1 (no discovery
+file), it is not on a loopback address, or it rejects your `MLAI_API_KEY`.
+
+**Fix.** Restart `serve` with the current version. Check that `~/mlai-bridge/serve.json` exists
+while it runs. To use a specific bridge anyway, pass `--url`.
 
 ## Empty reply
 
@@ -103,5 +118,5 @@ npm install -g @openai/codex
 **Cause.** The request fell back to the CLI, which accepts at most 30,000 characters. Claude Code
 and Codex send larger requests.
 
-**Fix.** Direct mode is needed for Claude Code and Codex. Check for the entries above, in
-particular "direct mode is off", and make sure `MLAI_DIRECT` is not set to `false`.
+**Fix.** Direct mode is needed for Claude Code and Codex. Make sure `MLAI_DIRECT` is not set to
+`false`, and see [Requests are slow, or fall back to the CLI](#requests-are-slow-or-fall-back-to-the-cli).

@@ -314,6 +314,7 @@ func testMux(s *server) *http.ServeMux {
 	mux.HandleFunc("/v1/chat/completions", s.handleOpenAIChat)
 	mux.HandleFunc("/v1/messages", s.handleAnthropicMessages)
 	mux.HandleFunc("/v1/messages/count_tokens", s.handleCountTokens)
+	mux.HandleFunc("/v1/status", s.handleStatus)
 	return mux
 }
 

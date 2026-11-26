@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -255,5 +256,38 @@ func TestSlowStreamReaderLosesTheConnection(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Error("the handler is still blocked on a client that does not read")
+	}
+}
+
+// A client that keeps reading must not lose a stream that lasts longer than one
+// writeStall: each event renews the deadline.
+func TestSteadyStreamReaderKeepsTheConnection(t *testing.T) {
+	saveGlobals(t)
+	oldStall := writeStall
+	writeStall = 300 * time.Millisecond
+	t.Cleanup(func() { writeStall = oldStall })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		renewWriteDeadline(w)
+		w.WriteHeader(200)
+		for i := 0; i < 12; i++ { // about 1.2 s in total, four deadlines long
+			fmt.Fprintf(w, "data: %d\n\n", i)
+			streamFlush(w)
+			time.Sleep(100 * time.Millisecond)
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		streamFlush(w)
+	}))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil || !strings.Contains(string(body), "data: [DONE]") {
+		t.Errorf("stream cut short: %v, got %q", err, body)
 	}
 }

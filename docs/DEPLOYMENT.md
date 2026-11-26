@@ -39,15 +39,17 @@ location ^~ /mlai/ {
 
 Then clients use `https://your.host/mlai/v1` with the key.
 
-**Direct bind.** `MLAI_API_KEY=<key> ./mlai-bridge -bind 0.0.0.0`. The bridge refuses to start on
-a non-loopback address without a key. Prefer a firewall allowlist over the open internet.
+**Direct bind (trusted networks only).** The bridge has no TLS, so the key and every prompt
+travel in clear. It refuses a non-loopback address unless it has a key and you opt in with
+`-allow-plain-http` (`MLAI_ALLOW_PLAIN_HTTP=true`). Prefer the reverse proxy above; otherwise use
+a firewall allowlist, never the open internet.
 
 Generate a key and keep it out of git. Pass it through the environment, not `-api-key`, which
 shows up in process lists:
 
 ```bash
 (umask 077 && openssl rand -hex 24 > .apikey)
-MLAI_API_KEY="$(cat .apikey)" ./mlai-bridge -bind 0.0.0.0
+MLAI_API_KEY="$(cat .apikey)" ./mlai-bridge -bind 0.0.0.0 -allow-plain-http
 ```
 
 Auth accepts `Authorization: Bearer <key>`, `x-api-key: <key>` or `api-key: <key>`. A key in the
@@ -98,6 +100,8 @@ as the init process, and the binary at `/usr/local/bin/mlai-bridge`. The contain
 `node` user.
 
 Defaults set in the image: `MLAI_BIND=0.0.0.0` (needed to publish the port),
+`MLAI_ALLOW_PLAIN_HTTP=true` (plain HTTP inside the container only: publish the port as
+`127.0.0.1:8197:8197`, or put TLS in front),
 `MLAI_WORKDIR=/data/workspace`, `MLAI_MODEL=pixis-opus`, `MLAI_PORT=8197`. Because the bind
 address is not loopback, the bridge refuses to start without `MLAI_API_KEY`. Pass the key at run
 time and never bake it into the image.

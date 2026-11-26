@@ -223,10 +223,16 @@ func (s *server) execute(ctx context.Context, model, system string, msgs []chatM
 		if raw, ok := s.cache.Get(key); ok {
 			var ca cachedAnswer
 			if json.Unmarshal(raw, &ca) == nil {
+				traceFrom(ctx).setPath("cache")
 				return execResult{answer: ca, cacheHit: true}
 			}
 		}
 	}
+	if tr := traceFrom(ctx); tr.isDirectOnly() {
+		tr.setPath("refused")
+		return execResult{err: s.directOnlyError(tr)}
+	}
+	traceFrom(ctx).setPath("cli")
 
 	release, aerr := s.acquire(ctx, s.sem)
 	if aerr != nil {
@@ -301,14 +307,23 @@ func (s *server) serveDirect(parent context.Context, body []byte, stream bool, s
 	ctx, cancel := context.WithTimeout(parent, cfg.Timeout)
 	defer cancel()
 
+	tr := traceFrom(parent)
 	resp, err := s.directRequest(ctx, body, stream)
 	if err != nil {
-		logger.Printf("direct path failed (%v) — falling back to CLI", err)
+		if tr.isDirectOnly() {
+			logger.Printf("direct path failed (%v) — direct-only, no CLI fallback", err)
+		} else {
+			logger.Printf("direct path failed (%v) — falling back to CLI", err)
+		}
+		tr.noteFallback(err.Error())
 		return false, nil
 	}
 	done := serve(resp)
 	if done {
 		requestsTotal.Add(1)
+		tr.setPath("direct")
+	} else {
+		tr.noteFallback("the gateway answer could not be read")
 	}
 	return done, nil
 }
@@ -484,6 +499,7 @@ func (s *server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		} else {
 			for _, piece := range splitText(answer.Text, 48) {
 				chunk(map[string]any{"content": piece}, nil)
+				noteText(w)
 			}
 		}
 		chunk(map[string]any{}, "stop")
@@ -677,6 +693,7 @@ func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 					"type": "content_block_delta", "index": 0,
 					"delta": map[string]any{"type": "text_delta", "text": piece},
 				})
+				noteText(w)
 			}
 			send("content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
 		}

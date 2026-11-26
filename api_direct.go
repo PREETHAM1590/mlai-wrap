@@ -93,6 +93,9 @@ func copySSE(w http.ResponseWriter, resp *http.Response) {
 				return
 			}
 			streamFlush(w)
+			if visibleContent.Match(buf[:n]) {
+				noteText(w)
+			}
 		}
 		if err != nil {
 			return
@@ -182,6 +185,7 @@ func streamToAnthropic(w http.ResponseWriter, resp *http.Response, model string)
 			textIdx = openBlock(map[string]any{"type": "text", "text": ""})
 		}
 		delta(textIdx, map[string]any{"type": "text_delta", "text": s})
+		noteText(w)
 	}
 	closeText := func() {
 		if textIdx >= 0 {

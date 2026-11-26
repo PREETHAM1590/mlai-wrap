@@ -51,9 +51,10 @@ On a machine without a browser, see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#head
 ## Quick start
 
 ```bash
-mlai-wrap serve                 # in its own terminal; listens on 127.0.0.1:8197
+mlai-wrap serve -prewarm        # in its own terminal; listens on 127.0.0.1:8197
 mlai-wrap claude -m pixis       # finds the running bridge by itself
 mlai-wrap codex -m pixis
+mlai-wrap status                # where requests spend their time
 ```
 
 Without a running bridge, `claude` and `codex` start a private one for the life of the client.
@@ -67,9 +68,9 @@ Without a running bridge, `claude` and `codex` start a private one for the life 
 | `codex` | Start Codex against a bridge. |
 | `env` | Print the variables that point Claude Code or Codex at a running bridge. |
 | `models` | List the model ids of a running bridge. |
-| `status` | Show the health of a running bridge; exit code 1 when it is down. |
+| `status` | Show a running bridge's build, keeper state, last fallback reason and request timings; exit code 1 when it is down. |
 | `doctor` | Check `mlai`, `claude` and `codex` and the `mlai` sign-in. |
-| `version` | Print the version. |
+| `version` | Print the package version, Git commit, Go version and platform. |
 | `help` | Print the usage text. |
 
 Options, environment variables and exit codes: [docs/COMMANDS.md](docs/COMMANDS.md).
@@ -100,9 +101,11 @@ Details: [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md).
 | --- | --- | --- |
 | `-port` `MLAI_PORT` | `8197` | listen port |
 | `-model` `MLAI_MODEL` | `pixis-opus` | default model id |
-| `-bind` `MLAI_BIND` | `127.0.0.1` | listen address; a non-loopback address needs a key |
+| `-bind` `MLAI_BIND` | `127.0.0.1` | listen address; a non-loopback address needs a key and `-allow-plain-http` |
 | `-api-key` `MLAI_API_KEY` | empty | bearer key for `/v1/*`; prefer the env var |
 | `-direct` `MLAI_DIRECT` | `true` | gateway direct mode; `false` uses the CLI only |
+| `-prewarm` `MLAI_PREWARM` | `false` | start the keeper with the bridge, so the first request does not wait |
+| `-direct-only` `MLAI_DIRECT_ONLY` | `false` | answer `503` with the reason instead of falling back to the CLI (per request: `X-MLAI-Direct-Only: true`) |
 
 All flags and variables: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 

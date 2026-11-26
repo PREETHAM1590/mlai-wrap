@@ -340,6 +340,7 @@ func (e *respEmitter) writeText(delta string) {
 	e.openText()
 	e.text.WriteString(delta)
 	e.send("response.output_text.delta", map[string]any{"item_id": e.msgID, "output_index": e.textIdx, "content_index": 0, "delta": delta, "logprobs": []any{}})
+	noteText(e.w)
 }
 
 func (e *respEmitter) closeText() {

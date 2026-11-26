@@ -307,7 +307,7 @@ func TestRunCLIBasics(t *testing.T) {
 	}
 	for _, a := range []string{"version", "--version"} {
 		out.Reset()
-		if code := runCLI([]string{a}, &out, &errb); code != 0 || strings.TrimSpace(out.String()) != "mlai-bridge "+version {
+		if code := runCLI([]string{a}, &out, &errb); code != 0 || !strings.HasPrefix(out.String(), "mlai-wrap "+packageVersion+" (mlai-bridge "+version) {
 			t.Errorf("%s: code %d, stdout %q", a, code, out.String())
 		}
 	}

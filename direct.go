@@ -71,6 +71,51 @@ type runKeeper struct {
 	// waited for. Both are set after Start and cleared by stopProc.
 	proc     *exec.Cmd
 	procDone chan struct{}
+	// lastStart is how long the last successful keeper start took to give a token.
+	lastStart time.Duration
+}
+
+// keeperStatus is the keeper's part of GET /v1/status.
+type keeperStatus struct {
+	TokenReady   bool    `json:"token_ready"`
+	TokenAgeS    int     `json:"token_age_s,omitempty"`
+	Starting     bool    `json:"starting"`
+	LastStartS   float64 `json:"last_start_s,omitempty"`
+	LastStartAgo int     `json:"last_start_ago_s,omitempty"`
+	FailsInARow  int     `json:"failures_in_a_row"`
+	LastError    string  `json:"last_error,omitempty"`
+}
+
+// State reports the keeper for /v1/status. No token is included.
+func (k *runKeeper) State() keeperStatus {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	st := keeperStatus{
+		TokenReady:  k.token != "" && time.Since(k.at) < tokenTTL,
+		Starting:    k.refresh != nil,
+		LastStartS:  k.lastStart.Seconds(),
+		FailsInARow: k.fails,
+	}
+	if st.TokenReady {
+		st.TokenAgeS = int(time.Since(k.at).Seconds())
+	}
+	if !k.lastSpawn.IsZero() {
+		st.LastStartAgo = int(time.Since(k.lastSpawn).Seconds())
+	}
+	if k.lastErr != nil {
+		st.LastError = k.lastErr.Error()
+	}
+	return st
+}
+
+// Prewarm starts a keeper run in the background so the first request finds a
+// token. It never blocks; a failure only leaves the usual backoff.
+func (k *runKeeper) Prewarm() {
+	go func() {
+		if _, err := k.Token(context.Background()); err != nil {
+			logger.Printf("keeper prewarm failed: %v", err)
+		}
+	}()
 }
 
 // errNoRunToken means the keeper's run ended without writing a run token.
@@ -268,6 +313,7 @@ func (k *runKeeper) runRefresh(done chan struct{}) {
 		k.stop(prev)
 	}
 
+	t0 := time.Now()
 	tok, id, err := k.spawn()
 
 	k.mu.Lock()
@@ -282,6 +328,7 @@ func (k *runKeeper) runRefresh(done chan struct{}) {
 	default:
 		k.token, k.session, k.at = tok, id, time.Now()
 		k.fails = 0
+		k.lastStart = time.Since(t0)
 	}
 	k.lastErr = err
 	k.refresh = nil
@@ -437,7 +484,24 @@ func (k *runKeeper) Close() {
 // directRequest posts an OpenAI-shaped body to the gateway with the run token.
 // The body of a >=400 answer is only logged.
 func (s *server) directRequest(ctx context.Context, body []byte, stream bool) (*http.Response, error) {
-	tok, err := s.keeper.Token(ctx)
+	tr := traceFrom(ctx)
+	// A request waits at most cfg.KeeperWait for a run token; the keeper run
+	// itself goes on, so the next request finds the token.
+	waitToken := func(get func(context.Context) (string, error)) (string, error) {
+		kctx, cancel := ctx, context.CancelFunc(func() {})
+		if cfg.KeeperWait > 0 {
+			kctx, cancel = context.WithTimeout(ctx, cfg.KeeperWait)
+		}
+		defer cancel()
+		t0 := time.Now()
+		tok, err := get(kctx)
+		tr.addKeeper(time.Since(t0))
+		if err != nil && kctx.Err() != nil && ctx.Err() == nil {
+			err = fmt.Errorf("no run token within %s (keeper still starting)", cfg.KeeperWait)
+		}
+		return tok, err
+	}
+	tok, err := waitToken(s.keeper.Token)
 	if err != nil {
 		return nil, err
 	}
@@ -461,7 +525,8 @@ func (s *server) directRequest(ctx context.Context, body []byte, stream bool) (*
 	if resp.StatusCode == 401 || resp.StatusCode == 409 {
 		// run ended or revoked — open a new one and retry once
 		resp.Body.Close()
-		tok, err = s.keeper.Refresh(ctx, tok)
+		stale := tok
+		tok, err = waitToken(func(c context.Context) (string, error) { return s.keeper.Refresh(c, stale) })
 		if err != nil {
 			return nil, err
 		}

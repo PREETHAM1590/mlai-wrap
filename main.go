@@ -48,6 +48,9 @@ type config struct {
 	APIKey            string
 	IsolateSkills     bool
 	AllowPlainHTTP    bool
+	DirectOnly        bool
+	Prewarm           bool
+	KeeperWait        time.Duration
 }
 
 var (
@@ -75,6 +78,9 @@ func initFlags(args []string) {
 	fs.IntVar(&cfg.CacheSize, "cache-size", 512, "cache entries")
 	fs.StringVar(&cfg.Effort, "effort", envStr("MLAI_EFFORT", ""), "reasoning effort: low|medium|high|max")
 	fs.BoolVar(&cfg.Direct, "direct", envBool("MLAI_DIRECT", true), "talk to the gateway directly (real token streaming) with CLI fallback")
+	fs.BoolVar(&cfg.DirectOnly, "direct-only", envBool("MLAI_DIRECT_ONLY", false), "never fall back to the CLI: when the gateway is unavailable, answer 503 with the reason (clients can ask per request with X-MLAI-Direct-Only: true)")
+	fs.BoolVar(&cfg.Prewarm, "prewarm", envBool("MLAI_PREWARM", false), "start the keeper when the bridge starts, so the first request finds a run token (one ML AI Code run)")
+	fs.DurationVar(&cfg.KeeperWait, "keeper-wait", envDuration("MLAI_KEEPER_WAIT", 30*time.Second), "how long a request waits for a run token before it falls back (or fails with -direct-only); 0 = the whole request timeout")
 	fs.BoolVar(&cfg.IsolateSkills, "isolate-skills", envBool("MLAI_ISOLATE_SKILLS", true), "run mlai without your Claude Code skills and agents (MLAI_HOME=~/mlai-bridge/home/.mlai)")
 	fs.StringVar(&cfg.Bind, "bind", envStr("MLAI_BIND", "127.0.0.1"), "listen address (0.0.0.0 to expose; requires an API key)")
 	fs.BoolVar(&cfg.AllowPlainHTTP, "allow-plain-http", envBool("MLAI_ALLOW_PLAIN_HTTP", false), "allow a non-loopback bind, which serves the API key and request bodies over plain HTTP (trusted networks only)")
@@ -91,6 +97,9 @@ func initFlags(args []string) {
 // validateConfig refuses to listen beyond loopback without an API key, and
 // without the explicit opt-in to plain HTTP (the bridge speaks no TLS).
 func validateConfig(c config) error {
+	if c.DirectOnly && !c.Direct {
+		return errors.New("-direct-only needs direct mode: remove -direct=false (MLAI_DIRECT=false)")
+	}
 	if isLoopbackHost(c.Bind) {
 		return nil
 	}
@@ -120,6 +129,15 @@ func envBool(k string, def bool) bool {
 func envStr(k, d string) string {
 	if v := os.Getenv(k); v != "" {
 		return v
+	}
+	return d
+}
+
+func envDuration(k string, d time.Duration) time.Duration {
+	if v := os.Getenv(k); v != "" {
+		if n, err := time.ParseDuration(v); err == nil && n >= 0 {
+			return n
+		}
 	}
 	return d
 }
@@ -190,6 +208,13 @@ func newServer() *server {
 }
 
 func (s *server) acquire(ctx context.Context, sem chan struct{}) (func(), *apiError) {
+	t0 := time.Now()
+	defer func() { traceFrom(ctx).addQueue(time.Since(t0)) }()
+	select {
+	case sem <- struct{}{}: // a free slot always wins, also with a zero wait
+		return func() { <-sem }, nil
+	default:
+	}
 	wait := time.NewTimer(cfg.QueueWait)
 	defer wait.Stop()
 	select {
@@ -275,8 +300,14 @@ func withMiddleware(next http.Handler) http.Handler {
 		// Overall bound on writing the response; streaming code renews it (stream.go).
 		http.NewResponseController(w).SetWriteDeadline(time.Now().Add(cfg.Timeout + time.Minute))
 		t0 := time.Now()
+		tr := &reqTrace{start: t0, directOnly: directOnly(r)}
+		r = r.WithContext(context.WithValue(r.Context(), traceKey{}, tr))
+		traces.Store(w, tr)
+		defer traces.Delete(w)
 		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/") {
-			if !takeSlot(r.Context(), slots) {
+			ok := takeSlot(r.Context(), slots)
+			tr.addQueue(time.Since(t0))
+			if !ok {
 				writeJSONAuthError(w, r, errBusy)
 				return
 			}
@@ -286,7 +317,8 @@ func withMiddleware(next http.Handler) http.Handler {
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 16<<20)
 		next.ServeHTTP(w, r)
-		logger.Printf("%s %q %q %s", id, r.Method, r.URL.Path, time.Since(t0).Round(time.Millisecond))
+		logger.Printf("%s %q %q %s%s", id, r.Method, r.URL.Path, time.Since(t0).Round(time.Millisecond), tr.logSuffix())
+		diag.record(tr)
 	})
 }
 
@@ -345,6 +377,7 @@ func newHTTPServer(s *server) *http.Server {
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/v1/models", s.handleModels)
+	mux.HandleFunc("/v1/status", s.handleStatus)
 	mux.HandleFunc("/v1/chat/completions", s.handleOpenAIChat)
 	mux.HandleFunc("/v1/responses", s.handleResponses)
 	mux.HandleFunc("/v1/messages", s.handleAnthropicMessages)
@@ -359,6 +392,14 @@ func newHTTPServer(s *server) *http.Server {
 		ReadHeaderTimeout: 15 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    64 << 10,
+	}
+}
+
+// startPrewarm opens the first keeper run now when -prewarm is set.
+func (s *server) startPrewarm() {
+	if cfg.Prewarm && s.direct && s.keeper != nil {
+		logger.Print("prewarm: starting the keeper")
+		s.keeper.Prewarm()
 	}
 }
 
@@ -430,6 +471,8 @@ func serveMain(args []string) {
 			s.discoverySecret = secret
 		}
 	}
+
+	s.startPrewarm()
 
 	go func() {
 		auth := "open"

@@ -12,10 +12,16 @@ The bridge exposes OpenAI-compatible and Anthropic-compatible endpoints. Default
 | `POST /v1/messages/count_tokens` | token estimate |
 | `POST /v1/responses` | OpenAI Responses, used by Codex; stateless |
 | `GET /v1/models` | model ids ([MODELS.md](MODELS.md)) |
-| `GET /healthz` | status, version, `uptime_s` and `signed_in`; the sign-in state is cached for 60 s |
+| `GET /healthz` | status, version, `uptime_s` and `signed_in`; the sign-in state is cached for 60 s. With `?challenge=<16-128 hex digits>`, a bridge started with `serve` adds `proof` (see [HOW-IT-WORKS.md](HOW-IT-WORKS.md#finding-the-shared-bridge)) |
+| `GET /v1/status` | build identity, keeper state, last fallback, timings of the last 200 requests ([below](#get-v1status)) |
 | `GET /metrics` | metrics |
 
-`/healthz` and `/metrics` stay open when a key is set. Every response carries `X-Request-Id`.
+`/healthz` and `/metrics` stay open when a key is set; `/v1/status` needs the key.
+
+Request header `X-MLAI-Direct-Only: true` (also `1` or `yes`): never fall back to the CLI for this
+request. If the direct path fails, the answer is `503 unavailable` with the reason. Codex can send
+it with `-c 'model_providers.mlai.http_headers={"X-MLAI-Direct-Only"="true"}'`; for Claude Code
+start the bridge with `-direct-only`. Every response carries `X-Request-Id`.
 Identical requests are cached and carry `X-Cache: HIT` or `X-Cache: MISS`. Usage fields are
 described in [HOW-IT-WORKS.md](HOW-IT-WORKS.md#token-accounting).
 
@@ -82,9 +88,31 @@ Errors are returned in the provider's native shape with a stable code:
 | 429 | `rate_limited` | upstream session or hourly ceiling |
 | 429 | `daily_cap` | allowance or credits exhausted |
 | 502 | `upstream_error` | CLI failed for another reason |
-| 503 | `unavailable` | CLI missing or not executable |
+| 503 | `unavailable` | CLI missing or not executable; or direct-only and the direct path failed (the message gives the reason) |
 | 504 | `timeout` | request exceeded `-timeout` |
 
-`429` responses carry `Retry-After`. CORS preflight is answered for browser clients.
+`429` responses carry `Retry-After`.
+
+## GET /v1/status
+
+```json
+{
+  "build": {"package": "0.1.1", "bridge": "1.0.0", "commit": "8fa0f29…", "built": "2026-11-26T14:34:21Z",
+            "go": "go1.26.11", "platform": "windows/amd64"},
+  "uptime_s": 58, "direct": true, "direct_only": false, "prewarm": true, "keeper_wait_s": 30,
+  "keeper": {"token_ready": true, "token_age_s": 44, "starting": false, "last_start_s": 14.5,
+             "last_start_ago_s": 58, "failures_in_a_row": 0},
+  "last_fallback": {"at": "2026-11-26T14:37:11Z", "ago_s": 120, "reason": "gateway returned HTTP 500"},
+  "fallbacks_total": 1,
+  "recent": {"count": 5, "by_path": {"direct": 5},
+             "queue_wait": {"count": 5, "p50_s": 0, "p95_s": 0},
+             "keeper_wait": {"count": 5, "p50_s": 0, "p95_s": 0},
+             "first_text": {"count": 3, "p50_s": 1.7, "p95_s": 4.0},
+             "total": {"count": 5, "p50_s": 3.8, "p95_s": 4.7}},
+  "active_requests": 0, "requests_total": 5, "requests_failed_total": 0
+}
+```
+
+`last_fallback` is left out when there was none. `mlai-wrap status` prints the same data. CORS preflight is answered for browser clients.
 
 Error messages sent to clients are fixed text. Raw CLI output appears only in the bridge logs.

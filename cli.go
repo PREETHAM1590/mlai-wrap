@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -92,7 +93,7 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 	case "doctor":
 		return runDoctor(stdout)
 	case "version", "--version":
-		fmt.Fprintf(stdout, "mlai-bridge %s\n", version)
+		fmt.Fprintln(stdout, currentBuild().String())
 		return 0
 	case "help", "-h", "--help":
 		printHelp(stdout)
@@ -449,6 +450,7 @@ func startWrapServer() (base, key string, stop func(), err error) {
 	go srv.Serve(ln)
 	base = "http://" + ln.Addr().String()
 	logger.Printf("mlai-bridge %s (wrap) on %s model=%s", version, base, cfg.DefaultModel)
+	s.startPrewarm()
 	stop = func() {
 		s.shutdown(srv)
 		f.Close()
@@ -809,18 +811,124 @@ func yesNo(b bool) string {
 }
 
 func runStatus(args []string, stdout, stderr io.Writer) int {
-	base, code := bridgeFlags("status", args, stderr)
-	if code >= 0 {
-		return code
+	fs := flag.NewFlagSet("mlai-bridge status", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	urlFlag := fs.String("url", "", "bridge URL (default: the bridge started with serve, then MLAI_BRIDGE_URL or "+defaultBridgeURL+")")
+	asJSON := fs.Bool("json", false, "print GET /v1/status as JSON")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	// The key goes only to a bridge the user named or one that proved it is
+	// the bridge started with `serve`; otherwise /v1/status is tried without it.
+	explicit := *urlFlag != "" || os.Getenv("MLAI_BRIDGE_URL") != ""
+	var base, key string
+	if explicit || !runningBridge(&base, &key) {
+		var err error
+		if base, err = resolveBridgeURL(*urlFlag); err != nil {
+			fmt.Fprintf(stderr, "mlai-bridge status: %v\n", err)
+			return 2
+		}
+		key = ""
+		if explicit {
+			key = strings.TrimSpace(os.Getenv("MLAI_API_KEY"))
+		}
 	}
 	h, err := checkHealth(base)
 	if err != nil {
 		fmt.Fprintf(stderr, "mlai-bridge status: down: %v\n", err)
 		return 1
 	}
+	var st statusDoc
+	stErr := getJSON(base+"/v1/status", key, 10*time.Second, &st)
+	if *asJSON {
+		if stErr != nil {
+			fmt.Fprintf(stderr, "mlai-bridge status: /v1/status: %v\n", stErr)
+			return 1
+		}
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(st)
+		return 0
+	}
 	fmt.Fprintf(stdout, "mlai-bridge %s at %s: %s, signed in: %s, uptime %ds\n",
 		h.Version, base, h.Status, yesNo(h.SignedIn), h.Uptime)
+	if stErr != nil {
+		// An older bridge has no /v1/status; one with a key needs MLAI_API_KEY.
+		fmt.Fprintf(stdout, "details:    not available (%v): set MLAI_API_KEY, or restart an older bridge with this version\n", stErr)
+		return 0
+	}
+	printStatus(stdout, st)
 	return 0
+}
+
+// printStatus prints GET /v1/status for people.
+func printStatus(w io.Writer, st statusDoc) {
+	fmt.Fprintf(w, "build:      %s\n", st.Build)
+	mode := "off (CLI only)"
+	if st.Direct {
+		mode = "on, CLI fallback on"
+		if st.DirectOnly {
+			mode = "on, direct-only (no CLI fallback)"
+		}
+	}
+	fmt.Fprintf(w, "direct:     %s; prewarm %s; keeper wait %s\n", mode, onOff(st.Prewarm), secs(st.KeeperWait))
+	k := st.Keeper
+	switch {
+	case k.TokenReady:
+		fmt.Fprintf(w, "keeper:     token ready (age %ds)", k.TokenAgeS)
+	case k.Starting:
+		fmt.Fprint(w, "keeper:     starting")
+	default:
+		fmt.Fprint(w, "keeper:     no token (starts with the next request)")
+	}
+	if k.LastStartS > 0 {
+		fmt.Fprintf(w, "; last start took %s", secs(k.LastStartS))
+	}
+	if k.FailsInARow > 0 {
+		fmt.Fprintf(w, "; %d failure(s) in a row: %s", k.FailsInARow, k.LastError)
+	}
+	fmt.Fprintln(w)
+	if st.Fallback != nil {
+		fmt.Fprintf(w, "fallback:   last %s ago: %s (%d since start)\n", time.Duration(st.Fallback.AgoS)*time.Second, st.Fallback.Reason, st.Fallbacks)
+	} else {
+		fmt.Fprintln(w, "fallback:   none since start")
+	}
+	r := st.Recent
+	if r.Count == 0 {
+		fmt.Fprintln(w, "requests:   none yet")
+		return
+	}
+	paths := make([]string, 0, len(r.ByPath))
+	for p, n := range r.ByPath {
+		paths = append(paths, fmt.Sprintf("%s %d", p, n))
+	}
+	sort.Strings(paths)
+	fmt.Fprintf(w, "requests:   last %d: %s; %d active now\n", r.Count, strings.Join(paths, ", "), st.Active)
+	row := func(label string, p percentiles) {
+		if p.Count == 0 {
+			return
+		}
+		fmt.Fprintf(w, "  %-12s p50 %-7s p95 %-7s (%d)\n", label, secs(p.P50), secs(p.P95), p.Count)
+	}
+	row("queue wait", r.Queue)
+	row("keeper wait", r.Keeper)
+	row("first text", r.FirstText)
+	row("total", r.Total)
+}
+
+// secs prints a number of seconds rounded to 0.1 s.
+func secs(s float64) string {
+	return time.Duration(s * float64(time.Second)).Round(100 * time.Millisecond).String()
+}
+
+func onOff(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
 }
 
 // runDoctor prints yes/no for each check and fails when mlai is missing or

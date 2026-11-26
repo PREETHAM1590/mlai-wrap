@@ -29,21 +29,52 @@ client ─► bridge ─► code.ml.ai/api/model/v1/chat/completions   (direct: 
 
 The keeper:
 
-- is a foreground `mlai -y -p` child of the bridge with a long `sleep` task, in
-  `<workdir>/.keeper`. It is not `mlai --bg`, which makes Windows Terminal open and close about
+- is a foreground `mlai -y -p` child of the bridge with a long `sleep` task, in its own folder
+  `<workdir>/.keeper/<pid>-<random>`, so two bridges on one workspace never use or stop each
+  other's runs. The folder is removed when the bridge stops. It is not `mlai --bg`, which makes Windows Terminal open and close about
   30 tabs every time it runs.
 - starts one run at a time, at least 10 s apart (longer after repeated failures). A keeper whose
   token the gateway rejected is stopped before a new one starts.
 - with mlai 0.3.27 ends its run after about 40 s: the agent moves the `sleep` to the background
   and ends the run. The token only lasts that long, so the bridge opens a new run about once a
-  minute while you work. A request that arrives while a new run is starting waits for it (up to
-  90 s) or falls back to the CLI. Each keeper run is one ML AI Code run on your plan.
-- records a failure that has no token. If a keeper run ends without a run token, the bridge
-  writes a per-mlai-version marker to `~/mlai-bridge/workspace/.keeper/unsupported`. Direct mode
-  stays off until `mlai --version` changes. Delete the file to retry sooner.
+  minute while you work. A request that arrives while a new run is starting waits up to
+  `-keeper-wait` (default 30 s) for it, then falls back to the CLI; the run goes on for the next
+  request. Each keeper run is one ML AI Code run on your plan.
+- retries a run that ends without a token after the cooldown, doubling it after each failure in
+  a row (up to 32x). A sign-in, quota or network problem looks the same as an unsupported mlai,
+  so nothing is switched off for good. A marker file `unsupported` left by 0.1.0 is removed.
+- is owned from start to shutdown: a keeper run that is still starting is killed when the bridge
+  stops.
+- with `-prewarm`, starts when the bridge starts, so the first request does not wait.
 
-Direct requests are limited by `-direct-concurrency` (default 8) and by `-timeout`, the same
-wall-clock limit the CLI path uses.
+Direct requests are limited by `-direct-concurrency` (default 8). One `-timeout` covers the whole
+request: the direct attempt and the CLI fallback share it.
+
+With `-direct-only`, or the header `X-MLAI-Direct-Only: true`, a request whose direct attempt
+fails gets `503 unavailable` with the reason (for example `no run token within 30s` or
+`gateway returned HTTP 500`) instead of a CLI run.
+
+## Diagnostics
+
+Every model request records its path (`direct`, `cli`, `cache` or `refused`), the time it waited
+for a slot, the time it waited for a run token, and, for streams, the time to the first text sent
+to the client. The request log line ends with these values:
+
+```
+req_17957… "POST" "/v1/messages" 1.853s path=direct queue=0s keeper=0s first_text=1.692s
+```
+
+The last 200 requests, the keeper state and the last fallback reason are available from
+`GET /v1/status` and `mlai-wrap status`. No token or prompt is included.
+
+## Finding the shared bridge
+
+`serve` on a loopback address writes `~/mlai-bridge/serve.json` (mode 0600) with its URL and a
+random 32-byte secret, and removes it when it stops. `/healthz?challenge=<hex>` then includes
+`proof`, an HMAC-SHA256 of the challenge keyed with the secret. The launcher reads the file,
+sends a fresh challenge and checks the proof before it sends a key or a prompt. A process that
+took over the port, or a stale file from a killed bridge, cannot answer, so the launcher starts
+a private bridge instead.
 
 Disable direct mode with `-direct=false` or `MLAI_DIRECT=false` to always use the CLI path. That
 path is slower, about 10 to 16 s to the first token, because the CLI buffers the whole answer. It
@@ -113,9 +144,14 @@ the link are in [CONFIGURATION.md](CONFIGURATION.md#skill-isolation).
 - CLI runs are limited by `-concurrency` (default 1) and direct requests by
   `-direct-concurrency` (default 8). A request waits up to `-queue-wait` (default 30s) for a
   slot, then fails with `429 concurrent`.
+- At most 32 `POST /v1/*` requests are admitted at once, before their bodies are read; the rest
+  wait up to `-queue-wait`. The cache holds at most 64 MiB, and no answer over 1 MiB is cached.
+- Each streamed write must complete within 60 s. A client that stops reading loses the
+  connection, which cancels the upstream request and frees its slot.
 - The bridge is a single binary that uses only the Go standard library.
 
 ## Network exposure
 
-The bridge listens on loopback by default. A non-loopback bind requires `MLAI_API_KEY`. For
+The bridge listens on loopback by default. A non-loopback bind requires `MLAI_API_KEY` and
+`-allow-plain-http`. For
 remote use see [DEPLOYMENT.md](DEPLOYMENT.md).
