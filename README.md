@@ -357,6 +357,12 @@ guarantee, so validate arguments on your side.
 
 ## Notes and limits
 
+- **Windows: a burst of terminal tabs.** Each `mlai --bg` run (the keeper that direct mode
+  uses) makes Windows Terminal open and close about 30 tabs in 20 s; `mlai --bg` does the
+  same when you run it yourself. When a keeper run ends without a run token, as with mlai
+  0.3.27, the bridge records that for this mlai version in `~/mlai-bridge/workspace/.keeper/unsupported`
+  and does not start the keeper again until `mlai --version` changes. Set `MLAI_DIRECT=false`
+  to skip the keeper entirely.
 - The CLI runs the full agent harness: expect ~14k prompt tokens of system context per
   call. The Infinite plan covers Pixis/Forge without a meter; other models spend credits.
 - `--mode ask` is used so the agent answers instead of editing files. The prompt is sent to

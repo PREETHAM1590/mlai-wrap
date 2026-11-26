@@ -4,11 +4,16 @@ package main
 // /v1/messages and /v1/responses, direct mode).
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const toolStream = `data: {"choices":[{"delta":{"content":"hi "}}]}
@@ -194,5 +199,45 @@ func TestCLIErrorFormats(t *testing.T) {
 		if got := cliError(json.RawMessage(raw)); got != want {
 			t.Errorf("cliError(%s) = %q, want %q", raw, got, want)
 		}
+	}
+}
+
+func TestKeeperStopsWhenTheRunGivesNoToken(t *testing.T) {
+	env := setupStub(t)
+	t.Setenv("STUB_BG", "ended")
+	k := newRunKeeper(cfg.MLAI, cfg.WorkDir)
+	t.Cleanup(func() { waitKeeperIdle(t, k) })
+
+	t0 := time.Now()
+	if _, err := k.Refresh(context.Background(), ""); err == nil || !errors.Is(err, errNoRunToken) {
+		t.Fatalf("err = %v, want errNoRunToken", err)
+	}
+	if d := time.Since(t0); d > 20*time.Second {
+		t.Errorf("took %s; the ended run should be noticed without waiting 90s", d)
+	}
+	// No more keeper runs: not after the cooldown, and not from a new bridge.
+	k.mu.Lock()
+	k.lastSpawn = time.Time{}
+	k.mu.Unlock()
+	if _, err := k.Refresh(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "direct mode is off") {
+		t.Errorf("second refresh: %v", err)
+	}
+	k2 := newRunKeeper(cfg.MLAI, cfg.WorkDir)
+	if _, err := k2.Refresh(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "direct mode is off") {
+		t.Errorf("new keeper: %v", err)
+	}
+	if n := env.count(t, "--bg"); n != 1 {
+		t.Errorf("--bg ran %d times, want 1", n)
+	}
+
+	// Another CLI binary (an update) gets one new try.
+	if err := os.WriteFile(filepath.Join(k.dir, unsupportedFile), []byte("other-binary|1|1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("STUB_BG", "")
+	k3 := newRunKeeper(cfg.MLAI, cfg.WorkDir)
+	t.Cleanup(func() { waitKeeperIdle(t, k3) })
+	if tok, err := k3.Refresh(context.Background(), ""); err != nil || !strings.HasPrefix(tok, "mlrun_") {
+		t.Errorf("after a CLI change: %q, %v", tok, err)
 	}
 }

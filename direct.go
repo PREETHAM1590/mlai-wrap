@@ -60,6 +60,31 @@ type runKeeper struct {
 	fails     int
 	refresh   chan struct{}
 	closed    bool
+	// unsupported is set once a keeper run ended without a run token: this mlai
+	// version cannot serve direct mode, and every new keeper run costs a burst
+	// of console windows on Windows. Remembered per CLI binary in unsupportedFile.
+	unsupported bool
+}
+
+// errNoRunToken means the keeper's run ended without writing a run token.
+var errNoRunToken = errors.New("the keeper run ended without a run token")
+
+const unsupportedFile = "unsupported"
+
+// cliStamp identifies the installed CLI (`mlai --version`), so an update retries
+// the keeper. It is "" when the version cannot be read.
+func cliStamp(bin string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, "--version")
+	cmd.Env = childEnv()
+	cmd.WaitDelay = 5 * time.Second
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	line, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
+	return strings.TrimSpace(line)
 }
 
 func newRunKeeper(mlaiBin, workdir string) *runKeeper {
@@ -68,7 +93,18 @@ func newRunKeeper(mlaiBin, workdir string) *runKeeper {
 		dir = abs
 	}
 	os.MkdirAll(dir, 0o700)
-	return &runKeeper{dir: dir, mlai: mlaiBin}
+	k := &runKeeper{dir: dir, mlai: mlaiBin}
+	if raw, err := os.ReadFile(filepath.Join(dir, unsupportedFile)); err == nil {
+		if stamp := cliStamp(mlaiBin); stamp != "" && strings.TrimSpace(string(raw)) == stamp {
+			k.unsupported = true
+		}
+	}
+	return k
+}
+
+// directOffMessage explains why direct mode is off and how to retry.
+func (k *runKeeper) directOffMessage() string {
+	return fmt.Sprintf("direct mode is off: this mlai version gives no run token (delete %s to retry)", filepath.Join(k.dir, unsupportedFile))
 }
 
 // sessionsDir is where the CLI writes per-run state (and the run token).
@@ -204,6 +240,10 @@ func (k *runKeeper) Refresh(ctx context.Context, stale string) (string, error) {
 		k.mu.Unlock()
 		return "", errors.New("keeper closed")
 	}
+	if k.unsupported {
+		k.mu.Unlock()
+		return "", errors.New(k.directOffMessage())
+	}
 	if k.refresh == nil {
 		if wait := keeperCooldown<<min(k.fails, 5) - time.Since(k.lastSpawn); wait > 0 {
 			k.mu.Unlock()
@@ -249,6 +289,13 @@ func (k *runKeeper) runRefresh(done chan struct{}) {
 	switch {
 	case err != nil:
 		k.fails++
+		if errors.Is(err, errNoRunToken) {
+			k.unsupported = true
+			if stamp := cliStamp(k.mlai); stamp != "" {
+				os.WriteFile(filepath.Join(k.dir, unsupportedFile), []byte(stamp+"\n"), 0o600)
+			}
+			logger.Print(k.directOffMessage())
+		}
 	case k.closed:
 		orphan, err = id, errors.New("keeper closed")
 	default:
@@ -289,10 +336,43 @@ func (k *runKeeper) spawn() (string, string, error) {
 			logger.Printf("run token refreshed (keeper pid %d, len %d)", cmd.Process.Pid, len(tok))
 			return tok, id, nil
 		}
+		if id := endedKeeperRun(k.dir, seen); id != "" {
+			// Look once more: the token may have been written just before the end.
+			if tok, tid, ok := tokenFromNewestSession(start, k.dir, seen); ok {
+				return tok, tid, nil
+			}
+			return "", "", fmt.Errorf("%w (run %s)", errNoRunToken, id)
+		}
 		time.Sleep(750 * time.Millisecond)
 	}
 	cmd.Process.Kill()
 	return "", "", fmt.Errorf("no run token appeared within 90s: %s", strings.TrimSpace(out.String()))
+}
+
+// endedKeeperRun returns the id of a new session in dir whose background run
+// has finished (bg.json state other than running), or "".
+func endedKeeperRun(dir string, seen map[string]bool) string {
+	root := sessionsDir()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if seen[e.Name()] || !sessionRunsIn(filepath.Join(root, e.Name()), dir) {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(root, e.Name(), "bg.json"))
+		if err != nil {
+			continue
+		}
+		var bg struct {
+			State string `json:"state"`
+		}
+		if json.Unmarshal(raw, &bg) == nil && bg.State != "" && bg.State != "running" && bg.State != "starting" && bg.State != "queued" {
+			return e.Name()
+		}
+	}
+	return ""
 }
 
 // stop asks the CLI to end a keeper run. Best effort: errors are ignored.

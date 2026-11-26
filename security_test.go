@@ -64,6 +64,8 @@ func runStub(args []string) int {
 		return 0
 	}
 	switch {
+	case args[0] == "--version":
+		fmt.Println("0.0.0-stub")
 	case args[0] == "whoami":
 		fmt.Println("Signed in as stub@example.test")
 	case args[0] == "--bg":
@@ -85,6 +87,17 @@ func stubBackground() int {
 	if os.Getenv("STUB_BG") == "fail" {
 		fmt.Fprintln(os.Stderr, "stub: cannot start a background run")
 		return 1
+	}
+	if os.Getenv("STUB_BG") == "ended" { // mlai 0.3.27: the run starts, errors and never writes a token
+		cwd, _ := os.Getwd()
+		id := fmt.Sprintf("ended-%d-%d", os.Getpid(), time.Now().UnixNano())
+		dir := filepath.Join(os.Getenv("STUB_HOME"), ".mlai", "sessions", id)
+		os.MkdirAll(dir, 0o700)
+		session, _ := json.Marshal(map[string]string{"root": cwd})
+		os.WriteFile(filepath.Join(dir, "session.json"), session, 0o600)
+		os.WriteFile(filepath.Join(dir, "bg.json"), []byte(`{"state":"error","exitCode":1}`), 0o600)
+		fmt.Println(id)
+		return 0
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
