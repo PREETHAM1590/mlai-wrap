@@ -124,7 +124,7 @@ npm install -g mlai-wrap
 ```
 
 Supported platforms: Windows x64, Linux x64 and arm64, macOS x64 and arm64. The binary comes
-from an optional dependency (`mlai-wrap-<os>-<cpu>`), so do not install with `--omit=optional`
+from an optional dependency (`@mlai-wrap/<os>-<cpu>`), so do not install with `--omit=optional`
 or `--no-optional`. To run a binary you built yourself, set `MLAI_WRAP_BINARY` to its path.
 
 Or build from source:

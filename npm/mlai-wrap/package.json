@@ -35,10 +35,10 @@
     "LICENSE"
   ],
   "optionalDependencies": {
-    "mlai-wrap-win32-x64": "0.0.0",
-    "mlai-wrap-linux-x64": "0.0.0",
-    "mlai-wrap-linux-arm64": "0.0.0",
-    "mlai-wrap-darwin-x64": "0.0.0",
-    "mlai-wrap-darwin-arm64": "0.0.0"
+    "@mlai-wrap/win32-x64": "0.0.0",
+    "@mlai-wrap/linux-x64": "0.0.0",
+    "@mlai-wrap/linux-arm64": "0.0.0",
+    "@mlai-wrap/darwin-x64": "0.0.0",
+    "@mlai-wrap/darwin-arm64": "0.0.0"
   }
 }

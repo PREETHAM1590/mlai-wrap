@@ -6,11 +6,11 @@ import { createRequire } from "node:module";
 import { accessSync, chmodSync, constants } from "node:fs";
 
 const PACKAGES = {
-  "win32-x64": "mlai-wrap-win32-x64",
-  "linux-x64": "mlai-wrap-linux-x64",
-  "linux-arm64": "mlai-wrap-linux-arm64",
-  "darwin-x64": "mlai-wrap-darwin-x64",
-  "darwin-arm64": "mlai-wrap-darwin-arm64",
+  "win32-x64": "@mlai-wrap/win32-x64",
+  "linux-x64": "@mlai-wrap/linux-x64",
+  "linux-arm64": "@mlai-wrap/linux-arm64",
+  "darwin-x64": "@mlai-wrap/darwin-x64",
+  "darwin-arm64": "@mlai-wrap/darwin-arm64",
 };
 
 function fail(message, code = 1) {

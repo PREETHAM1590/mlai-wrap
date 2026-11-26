@@ -73,7 +73,7 @@ Then update `docs/MODELS.md` (id, display name, plan, notes) **and** the `ids` s
 ## Releasing
 
 Tag the commit `vX.Y.Z` and push the tag. CI builds the five binaries, creates the GitHub
-release, then publishes `mlai-wrap` and the `mlai-wrap-*` platform packages to npm with version
+release, then publishes `mlai-wrap` and the `@mlai-wrap/*` platform packages to npm with version
 `X.Y.Z` (the version in `npm/mlai-wrap/package.json` stays `0.0.0`). The repository needs an
 `NPM_TOKEN` secret that can publish to the `mlai-wrap` package and the `@mlai-wrap` scope.
 To check the packages locally, build the binaries into `dist/` as named in
