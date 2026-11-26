@@ -208,6 +208,18 @@ func planLaunch(kind, base, key, model string) launchPlan {
 		"CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_MANTLE", "MLAI_API_KEY", "CLAUDECODE",
 	}
 	p.KeyVar = "ANTHROPIC_AUTH_TOKEN"
+	// An "env" block in ~/.claude/settings.json beats the process environment,
+	// so a user who already points ANTHROPIC_BASE_URL elsewhere would bypass the
+	// bridge. Settings given with --settings beat the user's files. The key stays
+	// in the environment only, never in argv.
+	env := map[string]string{}
+	for _, kv := range p.Set {
+		if name, val, _ := strings.Cut(kv, "="); name != p.KeyVar {
+			env[name] = val
+		}
+	}
+	raw, _ := json.Marshal(map[string]any{"env": env})
+	p.Args = []string{"--settings", string(raw)}
 	return p
 }
 

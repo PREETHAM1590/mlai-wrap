@@ -263,8 +263,24 @@ func TestPlanClaudeEnvironment(t *testing.T) {
 	}
 	expect("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "1")
 	expect("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
-	if len(plan.Args) != 0 {
-		t.Errorf("claude gets no extra arguments, got %v", plan.Args)
+	// The same values also go in --settings, which outranks ~/.claude/settings.json.
+	if len(plan.Args) != 2 || plan.Args[0] != "--settings" {
+		t.Fatalf("claude args = %v, want --settings <json>", plan.Args)
+	}
+	if strings.Contains(plan.Args[1], cliKey) {
+		t.Error("the key must not be in argv")
+	}
+	var s struct {
+		Env map[string]string `json:"env"`
+	}
+	if err := json.Unmarshal([]byte(plan.Args[1]), &s); err != nil {
+		t.Fatal(err)
+	}
+	if s.Env["ANTHROPIC_BASE_URL"] != "http://127.0.0.1:5000" || s.Env["ANTHROPIC_MODEL"] != "m-1" {
+		t.Errorf("settings env = %v", s.Env)
+	}
+	if _, ok := s.Env["ANTHROPIC_AUTH_TOKEN"]; ok {
+		t.Error("the key variable must not be in --settings")
 	}
 }
 
@@ -459,8 +475,10 @@ func TestExitCodePropagationAndChildEnvironment(t *testing.T) {
 		}
 	}
 	d, env := readDump(t, dump)
-	if want := []string{"-m", "keep", "--dry-run", "a b"}; !slices.Equal(d.Args, want) {
-		t.Errorf("client args = %v, want %v", d.Args, want)
+	if want := []string{"-m", "keep", "--dry-run", "a b"}; len(d.Args) != 6 || d.Args[0] != "--settings" || !slices.Equal(d.Args[2:], want) {
+		t.Errorf("client args = %v, want --settings <json> then %v", d.Args, want)
+	} else if !strings.Contains(d.Args[1], `"ANTHROPIC_BASE_URL":"`+bridge.URL+`"`) || strings.Contains(d.Args[1], cliKey) {
+		t.Errorf("--settings = %s", d.Args[1])
 	}
 	if env["ANTHROPIC_AUTH_TOKEN"] != cliKey || env["ANTHROPIC_BASE_URL"] != bridge.URL || env["ANTHROPIC_MODEL"] != "pixis-opus" {
 		t.Errorf("claude env: token %q, base %q, model %q", env["ANTHROPIC_AUTH_TOKEN"], env["ANTHROPIC_BASE_URL"], env["ANTHROPIC_MODEL"])
@@ -538,8 +556,10 @@ func TestPrivateBridgeForTheClient(t *testing.T) {
 		t.Fatalf("exit code = %d, want 5 (stderr %q)", code, errs)
 	}
 	d, env := readDump(t, dump)
-	if !slices.Equal(d.Args, []string{"hello"}) {
-		t.Errorf("client args = %v", d.Args)
+	if len(d.Args) != 3 || d.Args[0] != "--settings" || d.Args[2] != "hello" {
+		t.Errorf("client args = %v, want --settings <json> hello", d.Args)
+	} else if strings.Contains(d.Args[1], env["ANTHROPIC_AUTH_TOKEN"]) {
+		t.Error("the private key must not be in argv")
 	}
 	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(env["ANTHROPIC_AUTH_TOKEN"]) || env["ANTHROPIC_AUTH_TOKEN"] == cliKey {
 		t.Errorf("token %q is not a fresh 32-byte hex key", env["ANTHROPIC_AUTH_TOKEN"])
