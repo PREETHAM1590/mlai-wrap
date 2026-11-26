@@ -172,6 +172,11 @@ func TestCloseStopsAWarmingKeeper(t *testing.T) {
 		done = k.procDone
 		return done != nil
 	})
+	// The stub logs its call as its first step; close only once it has, so a
+	// slow start (the race detector) cannot make the count 0.
+	waitFor(t, 20*time.Second, "the keeper stub to log its start", func() bool {
+		return env.count(t, "-y") == 1
+	})
 
 	t0 := time.Now()
 	k.Close()

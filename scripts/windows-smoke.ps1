@@ -68,7 +68,11 @@ try {
 
 # Killed without cleanup: the discovery file stays, but nothing proves it, so
 # status does not use it (it may still find another bridge on the default port).
+# status exits 1 here on purpose; Windows PowerShell 5.1 would turn its
+# stderr into a terminating error under ErrorActionPreference=Stop.
+$ErrorActionPreference = 'Continue'
 $st = & $exe status 2>&1 | Out-String
+$ErrorActionPreference = 'Stop'
 Check ($st -notmatch "127\.0\.0\.1:$port") 'the stale discovery file of a killed bridge is not trusted'
 Check (-not (Get-Process -Id $p.Id -ErrorAction SilentlyContinue)) 'no bridge process is left'
 
@@ -78,3 +82,6 @@ if ($fails -gt 0) {
 }
 Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 Write-Host 'windows smoke test passed'
+# The last check ran `status` against a killed bridge, which exits 1 on purpose;
+# do not let that code become the script's result.
+exit 0
