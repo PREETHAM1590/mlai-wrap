@@ -216,7 +216,11 @@ func planLaunch(kind, base, key, model string) launchPlan {
 	// An "env" block in ~/.claude/settings.json beats the process environment,
 	// so a user who already points ANTHROPIC_BASE_URL elsewhere would bypass the
 	// bridge. Settings given with --settings beat the user's files. The key stays
-	// in the environment only, never in argv.
+	// in the environment only, never in argv: for ANTHROPIC_AUTH_TOKEN, Claude
+	// Code 2.1.33x prefers the process environment over any settings file, so a
+	// token stored in ~/.claude/settings.json or a project's settings cannot
+	// replace it (checked live: env key + wrong settings token works, wrong env
+	// token + right settings token gets 401).
 	env := map[string]string{}
 	for _, kv := range p.Set {
 		if name, val, _ := strings.Cut(kv, "="); name != p.KeyVar {

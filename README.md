@@ -63,7 +63,7 @@ Without a running bridge, `claude` and `codex` start a private one for the life 
 
 | Command | Purpose |
 | --- | --- |
-| `serve` | Run the bridge. This is also the default when no command is given. |
+| `serve` | Run the bridge. `mlai-bridge` with no command runs it too; `mlai-wrap` with no command prints help. |
 | `claude` | Start Claude Code against a bridge. |
 | `codex` | Start Codex against a bridge. |
 | `env` | Print the variables that point Claude Code or Codex at a running bridge. |

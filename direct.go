@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -67,6 +68,9 @@ type runKeeper struct {
 	// markerDir is the .keeper folder shared by every bridge on the same workdir;
 	// dir (the keeper's working directory) is private to this one.
 	markerDir string
+	// placeErr is set when no folder outside a git repository could be made:
+	// no keeper is started and Refresh fails at once.
+	placeErr error
 	// proc is the running keeper process and procDone is closed once it has been
 	// waited for. Both are set after Start and cleared by stopProc.
 	proc     *exec.Cmd
@@ -130,16 +134,59 @@ const unsupportedFile = "unsupported"
 func newRunKeeper(mlaiBin, workdir string) *runKeeper {
 	// Every bridge process gets its own keeper folder, so two bridges sharing a
 	// workspace never adopt or stop each other's runs. The marker stays in base.
-	base := filepath.Join(workdir, ".keeper")
-	if abs, err := filepath.Abs(base); err == nil {
-		base = abs
-	}
 	var rnd [4]byte
 	rand.Read(rnd[:])
-	dir := filepath.Join(base, fmt.Sprintf("%d-%s", os.Getpid(), hex.EncodeToString(rnd[:])))
-	os.MkdirAll(dir, 0o700)
+	id := fmt.Sprintf("%d-%s", os.Getpid(), hex.EncodeToString(rnd[:]))
+	base, dir, err := placeKeeper(workdir, id)
+	if err != nil {
+		logger.Printf("keeper: %v; direct mode is off", err)
+		return &runKeeper{mlai: mlaiBin, placeErr: err}
+	}
 	os.Remove(filepath.Join(base, unsupportedFile))
 	return &runKeeper{dir: dir, markerDir: base, mlai: mlaiBin}
+}
+
+// keeperBases lists where a keeper folder may go, in order of preference.
+var keeperBases = func(workdir string) []string {
+	bases := []string{filepath.Join(workdir, ".keeper")}
+	if c := keeperCacheBase(); c != "" {
+		bases = append(bases, c)
+	}
+	return append(bases, filepath.Join(os.TempDir(), "mlai-bridge-keeper"))
+}
+
+// placeKeeper picks the keeper's folder: <base>/<id> for the first base that
+// is outside every git work tree and can be created. Inside a git work tree
+// the CLI records the repository root, not the keeper's folder, so any other
+// mlai run in that repository would look like the keeper (and the bridge could
+// take its token or stop it). With no usable base it returns an error and no
+// keeper is started: one could never be matched to its session.
+func placeKeeper(workdir, id string) (base, dir string, err error) {
+	var tried []string
+	for _, b := range keeperBases(workdir) {
+		if abs, err := filepath.Abs(b); err == nil {
+			b = abs
+		}
+		if inGitTree(b) {
+			tried = append(tried, b+" (inside a git repository)")
+			continue
+		}
+		d := filepath.Join(b, id)
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			tried = append(tried, fmt.Sprintf("%s (%v)", b, err))
+			continue
+		}
+		if inGitTree(d) { // a link inside b led into a repository after all
+			os.Remove(d)
+			tried = append(tried, b+" (inside a git repository)")
+			continue
+		}
+		if len(tried) > 0 {
+			logger.Printf("keeper: using %s; not usable: %s", b, strings.Join(tried, "; "))
+		}
+		return b, d, nil
+	}
+	return "", "", fmt.Errorf("no folder for the keeper outside a git repository: %s", strings.Join(tried, "; "))
 }
 
 // sessionsDir is where the CLI writes per-run state (and the run token).
@@ -150,14 +197,24 @@ func sessionsDir() string {
 	return ""
 }
 
+// canonDir is p made absolute with every symlink resolved. When p does not
+// exist yet, the deepest existing ancestor is resolved and the rest appended,
+// so /alias/.keeper (alias -> /repo/sub) becomes /repo/sub/.keeper.
 func canonDir(p string) string {
 	if abs, err := filepath.Abs(p); err == nil {
 		p = abs
 	}
-	if rp, err := filepath.EvalSymlinks(p); err == nil {
-		p = rp
+	p = filepath.Clean(p)
+	rest := ""
+	for d := p; ; d = filepath.Dir(d) {
+		if rp, err := filepath.EvalSymlinks(d); err == nil {
+			return filepath.Join(rp, rest)
+		}
+		if d == filepath.Dir(d) {
+			return p
+		}
+		rest = filepath.Join(filepath.Base(d), rest)
 	}
-	return filepath.Clean(p)
 }
 
 func sameDir(a, b string) bool {
@@ -168,21 +225,32 @@ func sameDir(a, b string) bool {
 	return a == b
 }
 
-// gitRoot is the enclosing git work tree of dir, or dir itself: the CLI records
-// that as a session's root.
-func gitRoot(dir string) string {
-	for d := canonDir(dir); ; d = filepath.Dir(d) {
+// keeperCacheBase is the keeper folder used when the workdir is inside a git
+// repository: <user cache dir>/mlai-bridge/keeper, or "" without a cache dir.
+func keeperCacheBase() string {
+	c, err := os.UserCacheDir()
+	if err != nil || c == "" {
+		return ""
+	}
+	return filepath.Join(c, "mlai-bridge", "keeper")
+}
+
+// inGitTree reports whether dir or one of its parents holds a .git entry,
+// following links (and Windows junctions) first. dir need not exist yet.
+func inGitTree(dir string) bool {
+	for d := physicalDir(dir); ; d = filepath.Dir(d) {
 		if _, err := os.Stat(filepath.Join(d, ".git")); err == nil {
-			return d
+			return true
 		}
 		if d == filepath.Dir(d) {
-			return dir
+			return false
 		}
 	}
 }
 
-// sessionRunsIn reports whether the session's recorded root is dir or its git root. A missing or
-// unreadable session.json counts as no.
+// sessionRunsIn reports whether the session's recorded root is exactly dir. A
+// git-root match is not enough: every mlai run in that repository records the
+// same root. A missing or unreadable session.json counts as no.
 func sessionRunsIn(sessionDir, dir string) bool {
 	raw, err := os.ReadFile(filepath.Join(sessionDir, "session.json"))
 	if err != nil {
@@ -194,7 +262,7 @@ func sessionRunsIn(sessionDir, dir string) bool {
 	if json.Unmarshal(raw, &doc) != nil || doc.Root == "" {
 		return false
 	}
-	return sameDir(doc.Root, dir) || sameDir(doc.Root, gitRoot(dir))
+	return sameDir(doc.Root, dir)
 }
 
 // tokenFromNewestSession returns the newest mcp.json token (and its session id)
@@ -274,6 +342,10 @@ func (k *runKeeper) Refresh(ctx context.Context, stale string) (string, error) {
 	if k.closed {
 		k.mu.Unlock()
 		return "", errors.New("keeper closed")
+	}
+	if k.placeErr != nil {
+		k.mu.Unlock()
+		return "", k.placeErr
 	}
 	if k.refresh == nil {
 		if wait := keeperCooldown<<min(k.fails, 5) - time.Since(k.lastSpawn); wait > 0 {
@@ -362,7 +434,8 @@ func (k *runKeeper) spawn() (string, string, error) {
 		return "", "", fmt.Errorf("start keeper: %w", err)
 	}
 	exited := make(chan struct{})
-	go func() { cmd.Wait(); close(exited) }()
+	var waitErr error // written before exited is closed, read only after
+	go func() { waitErr = cmd.Wait(); close(exited) }()
 	k.mu.Lock()
 	k.proc, k.procDone = cmd, exited
 	k.mu.Unlock()
@@ -387,8 +460,19 @@ func (k *runKeeper) spawn() (string, string, error) {
 		ended := endedKeeperRun(k.dir, seen)
 		select {
 		case <-exited:
+			// Keep why the child ended: an exit code and the end of its output
+			// tell a sign-in, quota or network problem from a CLI change.
+			why := "exited"
+			if waitErr != nil {
+				why = waitErr.Error()
+			}
+			if tail := outputTail(out.String(), 300); tail != "" {
+				why += ": " + tail
+			}
 			if ended == "" {
-				ended = "keeper process exited"
+				ended = "keeper process " + why
+			} else {
+				ended += ", keeper process " + why
 			}
 		default:
 		}
@@ -401,7 +485,18 @@ func (k *runKeeper) spawn() (string, string, error) {
 		}
 		time.Sleep(750 * time.Millisecond)
 	}
-	return fail(fmt.Errorf("no run token appeared within 90s: %s", strings.TrimSpace(out.String())))
+	return fail(fmt.Errorf("no run token appeared within 90s: %s", outputTail(out.String(), 300)))
+}
+
+var secretLike = regexp.MustCompile(`(mlrun_|mlai_sk_|sk-)[A-Za-z0-9_-]+`)
+
+// outputTail is the last n bytes of s on one line, with token-like strings masked.
+func outputTail(s string, n int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > n {
+		s = "…" + s[len(s)-n:]
+	}
+	return secretLike.ReplaceAllString(s, "${1}***")
 }
 
 // endedKeeperRun returns the id of a new session in dir whose background run
@@ -478,7 +573,9 @@ func (k *runKeeper) Close() {
 		case <-time.After(closeWait):
 		}
 	}
-	os.RemoveAll(k.dir) // only this instance's folder, never the shared base
+	if k.dir != "" {
+		os.RemoveAll(k.dir) // only this instance's folder, never the shared base
+	}
 }
 
 // directRequest posts an OpenAI-shaped body to the gateway with the run token.
