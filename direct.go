@@ -10,8 +10,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -128,30 +126,58 @@ var errNoRunToken = errors.New("the keeper run ended without a run token")
 const unsupportedFile = "unsupported"
 
 func newRunKeeper(mlaiBin, workdir string) *runKeeper {
-	// Every bridge process gets its own keeper folder, so two bridges sharing a
-	// workspace never adopt or stop each other's runs. The marker stays in base.
-	base := filepath.Join(workdir, ".keeper")
-	if abs, err := filepath.Abs(base); err == nil {
-		base = abs
+	k := &runKeeper{mlai: mlaiBin}
+	base, err := filepath.Abs(filepath.Join(workdir, ".keeper"))
+	if err != nil {
+		k.lastErr = fmt.Errorf("place keeper: %w", err)
+		return k
 	}
-	// Inside a git work tree the CLI records the repository root, not the
-	// keeper's folder, so any other mlai run in that repository would look like
-	// the keeper (and the bridge could take its token or stop it). Keep the
-	// keeper outside every repository.
-	if inGitTree(base) {
-		if alt := keeperCacheBase(); alt != "" && !inGitTree(alt) {
-			logger.Printf("keeper: %s is inside a git repository; using %s for the keeper", workdir, alt)
-			base = alt
-		} else {
-			logger.Printf("keeper: %s is inside a git repository and no folder outside one is available; direct mode will not find its run token", workdir)
+
+	// Inside a Git work tree the CLI records the repository root for every
+	// run, so the keeper needs its own folder outside Git.
+	prefix := fmt.Sprintf("%d-", os.Getpid())
+	if !inGitTree(base) {
+		k.dir, k.lastErr = makeKeeperDir(base, prefix)
+		k.markerDir = base
+		return k
+	}
+
+	if cache := keeperCacheBase(); cache != "" && !inGitTree(cache) {
+		if dir, err := makeKeeperDir(cache, prefix); err == nil {
+			logger.Printf("keeper: %s is inside a git repository; using %s for the keeper", workdir, cache)
+			k.dir, k.markerDir = dir, cache
+			return k
 		}
 	}
-	var rnd [4]byte
-	rand.Read(rnd[:])
-	dir := filepath.Join(base, fmt.Sprintf("%d-%s", os.Getpid(), hex.EncodeToString(rnd[:])))
-	os.MkdirAll(dir, 0o700)
+
+	temp, err := filepath.Abs(os.TempDir())
+	if err == nil {
+		if inGitTree(temp) {
+			err = fmt.Errorf("temporary directory %s is inside a git repository", temp)
+		} else {
+			k.dir, err = os.MkdirTemp(temp, "mlai-bridge-keeper-"+prefix)
+		}
+	}
+	if err != nil {
+		k.lastErr = fmt.Errorf("place keeper outside Git: %w", err)
+	} else {
+		logger.Printf("keeper: %s is inside a git repository; using %s for the keeper", workdir, k.dir)
+	}
+	return k
+}
+
+// makeKeeperDir creates a private directory in the shared base and removes the
+// legacy marker, if present.
+func makeKeeperDir(base, prefix string) (string, error) {
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		return "", fmt.Errorf("place keeper: %w", err)
+	}
+	dir, err := os.MkdirTemp(base, prefix)
+	if err != nil {
+		return "", fmt.Errorf("place keeper: %w", err)
+	}
 	os.Remove(filepath.Join(base, unsupportedFile))
-	return &runKeeper{dir: dir, markerDir: base, mlai: mlaiBin}
+	return dir, nil
 }
 
 // sessionsDir is where the CLI writes per-run state (and the run token).
@@ -193,8 +219,24 @@ func keeperCacheBase() string {
 // inGitTree reports whether dir or one of its parents holds a .git entry. dir
 // need not exist yet.
 func inGitTree(dir string) bool {
-	for d := canonDir(dir); ; d = filepath.Dir(d) {
-		if _, err := os.Stat(filepath.Join(d, ".git")); err == nil {
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	// EvalSymlinks needs an existing path. Resolve the nearest existing
+	// ancestor first, then walk the physical parents of that ancestor.
+	for {
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			dir = resolved
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	for d := dir; ; d = filepath.Dir(d) {
+		if _, err := os.Lstat(filepath.Join(d, ".git")); err == nil {
 			return true
 		}
 		if d == filepath.Dir(d) {
@@ -297,6 +339,11 @@ func (k *runKeeper) Refresh(ctx context.Context, stale string) (string, error) {
 	if k.closed {
 		k.mu.Unlock()
 		return "", errors.New("keeper closed")
+	}
+	if k.dir == "" { // placement failed; there is no directory to start in
+		err := k.lastErr
+		k.mu.Unlock()
+		return "", err
 	}
 	if k.refresh == nil {
 		if wait := keeperCooldown<<min(k.fails, 5) - time.Since(k.lastSpawn); wait > 0 {

@@ -19,6 +19,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -1186,6 +1187,73 @@ func TestKeeperLeavesAGitRepository(t *testing.T) {
 	t.Cleanup(plain.Close)
 	if !strings.Contains(filepath.ToSlash(plain.dir), "/workspace/.keeper/") {
 		t.Errorf("keeper folder %s, want <workdir>/.keeper/<id>", plain.dir)
+	}
+}
+
+func TestInGitTreeFollowsSymlinkForMissingPath(t *testing.T) {
+	setupStub(t)
+	repo, outside := t.TempDir(), t.TempDir()
+	work := filepath.Join(repo, "work")
+	if err := errors.Join(
+		os.WriteFile(filepath.Join(repo, ".git"), []byte("gitdir: elsewhere"), 0o600),
+		os.Mkdir(work, 0o700),
+	); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(outside, "link")
+	if err := os.Symlink(work, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	if !inGitTree(filepath.Join(link, "missing", ".keeper")) {
+		t.Fatal("missing keeper path through a symlink must detect the physical repository")
+	}
+}
+
+func TestKeeperPlacementWhenWorkdirAndCacheAreInGit(t *testing.T) {
+	env := setupStub(t)
+	repo := filepath.Dir(cfg.WorkDir)
+	if err := os.Mkdir(filepath.Join(repo, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LocalAppData", repo)
+	t.Setenv("XDG_CACHE_HOME", repo)
+	t.Setenv("HOME", repo)
+
+	outside := t.TempDir()
+	setTemp := func(dir string) {
+		t.Setenv("TMPDIR", dir)
+		t.Setenv("TMP", dir)
+		t.Setenv("TEMP", dir)
+	}
+	setTemp(outside)
+	k := newRunKeeper(cfg.MLAI, cfg.WorkDir)
+	t.Cleanup(k.Close)
+	if !sameDir(filepath.Dir(k.dir), outside) {
+		t.Fatalf("keeper folder %q, want a private folder under %q", k.dir, outside)
+	}
+	if tok, err := k.Token(context.Background()); err != nil || tok == "" {
+		t.Fatalf("keeper could not start in the temp folder: %v", err)
+	}
+	k.Close()
+
+	for _, temp := range []string{repo, filepath.Join(outside, "missing")} {
+		setTemp(temp)
+		s := newTestServer(t)
+		s.direct = true
+		t.Cleanup(s.keeper.Close)
+		if _, err := s.keeper.Token(context.Background()); err == nil || !strings.Contains(err.Error(), "place keeper") {
+			t.Fatalf("keeper token error = %v, want a placement failure", err)
+		}
+		rec := serve(testChain(s, ""), "POST", "/v1/chat/completions", "", jsonHeader, strings.NewReader(chatBody))
+		if rec.Code != 200 || !strings.Contains(rec.Body.String(), "stub:hello") {
+			t.Fatalf("CLI fallback got %d %s", rec.Code, rec.Body)
+		}
+	}
+	if n := env.count(t, "-y"); n != 1 {
+		t.Errorf("keeper started %d times, want just the start outside Git", n)
 	}
 }
 
