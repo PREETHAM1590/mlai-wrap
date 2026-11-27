@@ -8,10 +8,24 @@ setups: a remote bind, systemd, Docker and signing in without a browser.
 `mlai login` listens on a random localhost port and prints an auth URL. On a remote box
 (VPS, no local browser):
 
-```bash
-ssh -L <port>:127.0.0.1:<port> user@host   # keep this open
-# then run `mlai login` on the host and open the printed URL on your laptop
-```
+The port is only known once `mlai login` is running, so start it first and open the tunnel
+second:
+
+1. In one SSH session on the host, start the sign-in without a browser and leave it running:
+
+   ```bash
+   MLAI_NO_BROWSER=1 mlai login
+   ```
+
+   Note the port in the printed `http://127.0.0.1:<port>/…` URL.
+2. On your laptop, in a second terminal, forward that port and keep the tunnel open:
+
+   ```bash
+   ssh -N -L <port>:127.0.0.1:<port> user@host
+   ```
+
+3. Open the printed URL in your laptop's browser. `mlai login` finishes on the host once you
+   have signed in; then close the tunnel.
 
 ## Exposing it beyond localhost
 

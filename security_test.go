@@ -200,6 +200,9 @@ func setupStub(t *testing.T) *stubEnv {
 	t.Setenv("HOME", env.home)
 	t.Setenv("USERPROFILE", env.home)
 	t.Setenv("STUB_HOME", env.home)
+	// The stub writes sessions under STUB_HOME/.mlai; a developer's own MLAI_HOME
+	// must not point the bridge's reader somewhere else.
+	t.Setenv("MLAI_HOME", filepath.Join(env.home, ".mlai"))
 	t.Setenv("STUB_LOG", env.log)
 	t.Setenv("STUB_MODE", "")
 	t.Setenv("STUB_BG", "")
@@ -1138,14 +1141,16 @@ func TestKeeperStopsOnlyRejectedRuns(t *testing.T) {
 	}
 }
 
-func TestSessionRootInsideGitRepo(t *testing.T) {
+// Inside a git repository every mlai run records the repository root, so a
+// session counts as the keeper's only when its root is exactly the keeper folder.
+func TestSessionRootMustBeTheKeeperFolder(t *testing.T) {
 	repo := t.TempDir()
 	dir := filepath.Join(repo, "workspace", ".keeper")
 	session := t.TempDir()
 	if err := errors.Join(os.Mkdir(filepath.Join(repo, ".git"), 0o700), os.MkdirAll(dir, 0o700)); err != nil {
 		t.Fatal(err)
 	}
-	for root, want := range map[string]bool{repo: true, dir: true, filepath.Dir(dir): false, filepath.Dir(repo): false} {
+	for root, want := range map[string]bool{repo: false, dir: true, filepath.Dir(dir): false, filepath.Dir(repo): false} {
 		raw, _ := json.Marshal(map[string]string{"root": root})
 		if err := os.WriteFile(filepath.Join(session, "session.json"), raw, 0o600); err != nil {
 			t.Fatal(err)
@@ -1153,6 +1158,34 @@ func TestSessionRootInsideGitRepo(t *testing.T) {
 		if got := sessionRunsIn(session, dir); got != want {
 			t.Errorf("root %q: got %v, want %v", root, got, want)
 		}
+	}
+}
+
+// A workdir inside a git repository puts the keeper in the user cache folder,
+// outside the repository, so its runs can be told apart from the user's.
+func TestKeeperLeavesAGitRepository(t *testing.T) {
+	setupStub(t)
+	repo := t.TempDir()
+	if err := os.Mkdir(filepath.Join(repo, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cache := t.TempDir()
+	t.Setenv("LocalAppData", cache)   // windows
+	t.Setenv("XDG_CACHE_HOME", cache) // linux
+	t.Setenv("HOME", cache)           // darwin: ~/Library/Caches
+	k := newRunKeeper(cfg.MLAI, filepath.Join(repo, "workspace"))
+	t.Cleanup(k.Close)
+	if inGitTree(k.dir) {
+		t.Fatalf("keeper folder %s is still inside a git repository", k.dir)
+	}
+	if !strings.HasPrefix(canonDir(k.dir), canonDir(cache)) {
+		t.Errorf("keeper folder %s, want it under the cache folder %s", k.dir, cache)
+	}
+	// Outside a repository the keeper stays in the workdir.
+	plain := newRunKeeper(cfg.MLAI, filepath.Join(t.TempDir(), "workspace"))
+	t.Cleanup(plain.Close)
+	if !strings.Contains(filepath.ToSlash(plain.dir), "/workspace/.keeper/") {
+		t.Errorf("keeper folder %s, want <workdir>/.keeper/<id>", plain.dir)
 	}
 }
 

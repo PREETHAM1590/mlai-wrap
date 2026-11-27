@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -99,4 +100,42 @@ func TestCP1252Safe(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestJunctionCmdLineQuotesCmdMetacharacters(t *testing.T) {
+	line, err := junctionCmdLine(`C:\Users\A&B\link`, `C:\Users\A&B (x)\.mlai`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `cmd.exe /d /c mklink /J "C:\Users\A&B\link" "C:\Users\A&B (x)\.mlai"`; line != want {
+		t.Errorf("line = %s\nwant   %s", line, want)
+	}
+	for _, bad := range []string{`C:\Users\100%x%\.mlai`, `C:\Users\a"b`} {
+		if _, err := junctionCmdLine(`C:\link`, bad); err == nil {
+			t.Errorf("%q must be refused", bad)
+		}
+	}
+}
+
+// On Windows, a real junction under a home folder whose name has & in it.
+func TestJunctionWithAmpersandInPath(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("junctions are Windows-only")
+	}
+	base := filepath.Join(t.TempDir(), "A&B")
+	target := filepath.Join(base, "real")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "probe"), []byte("ok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := makeDirLink(link, target); err != nil {
+		t.Fatalf("makeDirLink: %v", err)
+	}
+	if raw, err := os.ReadFile(filepath.Join(link, "probe")); err != nil || string(raw) != "ok" {
+		t.Errorf("reading through the junction: %q, %v", raw, err)
+	}
+	os.Remove(link) // removes the junction only
 }

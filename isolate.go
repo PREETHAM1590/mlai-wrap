@@ -12,7 +12,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -79,7 +78,11 @@ func makeDirLink(link, target string) error {
 	if runtime.GOOS != "windows" {
 		return os.Symlink(target, link)
 	}
-	out, err := exec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput()
+	cmd, err := junctionCommand(link, target)
+	if err != nil {
+		return err
+	}
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -151,4 +154,18 @@ func cp1252Safe(s string) string {
 		return s
 	}
 	return b.String()
+}
+
+// junctionCmdLine is the exact cmd.exe command line that makes link a junction
+// to target. Go quotes only arguments with spaces, so `C:\Users\A&B` would reach
+// cmd.exe bare and `&` would split the command; here both paths are always
+// quoted. cmd.exe still expands %VAR% inside quotes and a path cannot hold `"`,
+// so paths with either are refused (isolation is then turned off, with a log line).
+func junctionCmdLine(link, target string) (string, error) {
+	for _, p := range []string{link, target} {
+		if strings.ContainsAny(p, "\"%\r\n") {
+			return "", fmt.Errorf("cannot create a junction for %q: the path contains %% or a quote", p)
+		}
+	}
+	return `cmd.exe /d /c mklink /J "` + link + `" "` + target + `"`, nil
 }

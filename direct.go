@@ -134,6 +134,18 @@ func newRunKeeper(mlaiBin, workdir string) *runKeeper {
 	if abs, err := filepath.Abs(base); err == nil {
 		base = abs
 	}
+	// Inside a git work tree the CLI records the repository root, not the
+	// keeper's folder, so any other mlai run in that repository would look like
+	// the keeper (and the bridge could take its token or stop it). Keep the
+	// keeper outside every repository.
+	if inGitTree(base) {
+		if alt := keeperCacheBase(); alt != "" && !inGitTree(alt) {
+			logger.Printf("keeper: %s is inside a git repository; using %s for the keeper", workdir, alt)
+			base = alt
+		} else {
+			logger.Printf("keeper: %s is inside a git repository and no folder outside one is available; direct mode will not find its run token", workdir)
+		}
+	}
 	var rnd [4]byte
 	rand.Read(rnd[:])
 	dir := filepath.Join(base, fmt.Sprintf("%d-%s", os.Getpid(), hex.EncodeToString(rnd[:])))
@@ -168,21 +180,32 @@ func sameDir(a, b string) bool {
 	return a == b
 }
 
-// gitRoot is the enclosing git work tree of dir, or dir itself: the CLI records
-// that as a session's root.
-func gitRoot(dir string) string {
+// keeperCacheBase is the keeper folder used when the workdir is inside a git
+// repository: <user cache dir>/mlai-bridge/keeper, or "" without a cache dir.
+func keeperCacheBase() string {
+	c, err := os.UserCacheDir()
+	if err != nil || c == "" {
+		return ""
+	}
+	return filepath.Join(c, "mlai-bridge", "keeper")
+}
+
+// inGitTree reports whether dir or one of its parents holds a .git entry. dir
+// need not exist yet.
+func inGitTree(dir string) bool {
 	for d := canonDir(dir); ; d = filepath.Dir(d) {
 		if _, err := os.Stat(filepath.Join(d, ".git")); err == nil {
-			return d
+			return true
 		}
 		if d == filepath.Dir(d) {
-			return dir
+			return false
 		}
 	}
 }
 
-// sessionRunsIn reports whether the session's recorded root is dir or its git root. A missing or
-// unreadable session.json counts as no.
+// sessionRunsIn reports whether the session's recorded root is exactly dir. A
+// git-root match is not enough: every mlai run in that repository records the
+// same root. A missing or unreadable session.json counts as no.
 func sessionRunsIn(sessionDir, dir string) bool {
 	raw, err := os.ReadFile(filepath.Join(sessionDir, "session.json"))
 	if err != nil {
@@ -194,7 +217,7 @@ func sessionRunsIn(sessionDir, dir string) bool {
 	if json.Unmarshal(raw, &doc) != nil || doc.Root == "" {
 		return false
 	}
-	return sameDir(doc.Root, dir) || sameDir(doc.Root, gitRoot(dir))
+	return sameDir(doc.Root, dir)
 }
 
 // tokenFromNewestSession returns the newest mcp.json token (and its session id)

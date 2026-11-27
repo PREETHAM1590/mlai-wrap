@@ -25,6 +25,19 @@ func hideConsole(cmd *exec.Cmd) {
 	cmd.SysProcAttr.HideWindow = true
 }
 
+// junctionCommand runs mklink /J with the command line from junctionCmdLine,
+// passed to CreateProcess unchanged.
+func junctionCommand(link, target string) (*exec.Cmd, error) {
+	line, err := junctionCmdLine(link, target)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command("cmd.exe")
+	cmd.SysProcAttr = &syscall.SysProcAttr{CmdLine: line}
+	hideConsole(cmd)
+	return cmd, nil
+}
+
 // killTree kills cmd and its descendants.
 func killTree(cmd *exec.Cmd) error {
 	if cmd.Process == nil {
