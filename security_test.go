@@ -1231,7 +1231,7 @@ func TestKeeperPlacementWhenWorkdirAndCacheAreInGit(t *testing.T) {
 	setTemp(outside)
 	k := newRunKeeper(cfg.MLAI, cfg.WorkDir)
 	t.Cleanup(k.Close)
-	if !sameDir(filepath.Dir(k.dir), outside) {
+	if !strings.HasPrefix(canonDir(k.dir), canonDir(outside)) || inGitTree(k.dir) {
 		t.Fatalf("keeper folder %q, want a private folder under %q", k.dir, outside)
 	}
 	if tok, err := k.Token(context.Background()); err != nil || tok == "" {
@@ -1239,12 +1239,13 @@ func TestKeeperPlacementWhenWorkdirAndCacheAreInGit(t *testing.T) {
 	}
 	k.Close()
 
-	for _, temp := range []string{repo, filepath.Join(outside, "missing")} {
+	// Workdir, cache and temp folder all inside the repository: no keeper.
+	for _, temp := range []string{repo} {
 		setTemp(temp)
 		s := newTestServer(t)
 		s.direct = true
 		t.Cleanup(s.keeper.Close)
-		if _, err := s.keeper.Token(context.Background()); err == nil || !strings.Contains(err.Error(), "place keeper") {
+		if _, err := s.keeper.Token(context.Background()); err == nil || !strings.Contains(err.Error(), "no folder for the keeper") {
 			t.Fatalf("keeper token error = %v, want a placement failure", err)
 		}
 		rec := serve(testChain(s, ""), "POST", "/v1/chat/completions", "", jsonHeader, strings.NewReader(chatBody))

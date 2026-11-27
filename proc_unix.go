@@ -19,6 +19,9 @@ func junctionCommand(link, target string) (*exec.Cmd, error) {
 	return nil, errors.New("junctions exist only on Windows")
 }
 
+// physicalDir is dir with every symlink resolved (see canonDir).
+func physicalDir(dir string) string { return canonDir(dir) }
+
 // hideConsole is a no-op outside Windows.
 func hideConsole(cmd *exec.Cmd) {}
 
